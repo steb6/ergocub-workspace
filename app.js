@@ -42,7 +42,9 @@ $('c_robot').onchange = e => { if (robot) robot.visible = e.target.checked; };
 // ---------- arm chains (same as offline: ergocub-cartesian-control chain + control-board limits) ----------
 const chains = await (await fetch('data/chains.json')).json();
 const meta = await (await fetch('data/meta.json')).json();
-const qcur = { l: new Array(7).fill(0), r: new Array(7).fill(0) };
+const qcur = {}; for (const k in chains) qcur[k] = new Array(chains[k].joints.length).fill(0);
+const tk = () => $('torso').value === 'free' ? 't' : '';  // chain/cloud prefix: '' torso locked, 't' torso free
+const vkey = () => tk() + $('variant').value;
 const R_DOWN = { l: [[0, 0, -1], [-1, 0, 0], [0, 1, 0]], r: [[0, 0, -1], [1, 0, 0], [0, -1, 0]] };
 
 const mm = (A, B) => A.map(r => B[0].map((_, j) => r.reduce((s, v, k) => s + v * B[k][j], 0)));
@@ -55,7 +57,7 @@ function rodrigues(a, q) {
 }
 function fk(ch, q) {
   let R = [[1, 0, 0], [0, 1, 0], [0, 0, 1]], p = [0, 0, 0]; const zs = [], ps = [];
-  for (let i = 0; i < 7; i++) {
+  for (let i = 0; i < ch.T.length; i++) {
     const T = ch.T[i];
     p = p.map((v, k) => v + mv(R, [T[0][3], T[1][3], T[2][3]])[k]);
     R = mm(R, T.slice(0, 3).map(r => r.slice(0, 3)));
@@ -65,7 +67,7 @@ function fk(ch, q) {
   const tl = ch.tool; p = p.map((v, k) => v + mv(R, [tl[0][3], tl[1][3], tl[2][3]])[k]);
   R = mm(R, tl.slice(0, 3).map(r => r.slice(0, 3)));
   const J = [[], [], [], [], [], []];
-  for (let i = 0; i < 7; i++) { const c = cross(zs[i], p.map((v, k) => v - ps[i][k])); for (let k = 0; k < 3; k++) { J[k][i] = c[k]; J[k + 3][i] = zs[i][k]; } }
+  for (let i = 0; i < ch.T.length; i++) { const c = cross(zs[i], p.map((v, k) => v - ps[i][k])); for (let k = 0; k < 3; k++) { J[k][i] = c[k]; J[k + 3][i] = zs[i][k]; } }
   return { p, R, J };
 }
 function solve(A, b) { // Gaussian elimination with partial pivoting
@@ -84,8 +86,8 @@ const rotAngle = (Rd, R) => { const E = mm(Rd, T3(R)); return Math.acos(Math.min
 
 // damped least squares + joint-limit clamping, several seeds (same scheme as the offline grid)
 function ik(side, target, Rd) {
-  const ch = chains[side], lo = ch.qmin, hi = ch.qmax, wr = 0.3;
-  const seeds = [qcur[side].slice(), lo.map(() => 0), lo.map((l, i) => (l + hi[i]) / 2)];
+  const key = tk() + side, ch = chains[key], lo = ch.qmin, hi = ch.qmax, wr = 0.3;
+  const seeds = [qcur[key].slice(), lo.map(() => 0), lo.map((l, i) => (l + hi[i]) / 2)];
   for (let k = 0; k < 25; k++) seeds.push(lo.map((l, i) => l + Math.random() * (hi[i] - l)));
   let best = null;
   for (const s of seeds) {
@@ -110,12 +112,16 @@ function ik(side, target, Rd) {
 
 const targetMarker = new THREE.Mesh(new THREE.SphereGeometry(0.015), new THREE.MeshBasicMaterial({ color: 0xff3366 }));
 targetMarker.visible = false; world.add(targetMarker);
-function setArm(side, q) { qcur[side] = q; if (robot) chains[side].joints.forEach((n, i) => robot.setJointValue(n, q[i])); }
+function setArm(key, q) {  // key = side or 't'+side; locked torso -> torso joints back to 0
+  qcur[key] = q; if (!robot) return;
+  if (key.length === 1) ['torso_roll', 'torso_pitch', 'torso_yaw'].forEach(n => robot.setJointValue(n, 0));
+  chains[key].joints.forEach((n, i) => robot.setJointValue(n, q[i]));
+}
 function goTo(target) {
   const side = $('arm').value, Rd = $('ikori').value === 'down' ? R_DOWN[side] : null;
   targetMarker.position.set(...target); targetMarker.visible = true;
   const b = ik(side, target, Rd);
-  setArm(side, b.q);
+  setArm(tk() + side, b.q);
   const ok = b.err < 0.01 && (!Rd || b.ang < 10 * DEG);
   const msg = `${ok ? 'reached' : 'NOT reachable'}: position error ${(b.err * 100).toFixed(1)} cm` +
     (Rd ? `, orientation error ${(b.ang / DEG).toFixed(1)}°` : '') +
@@ -124,14 +130,15 @@ function goTo(target) {
   window.lastIK = b;
 }
 $('go').onclick = () => goTo(['tx', 'ty', 'tz'].map(i => parseFloat($(i).value)));
-$('home').onclick = () => { setArm('l', new Array(7).fill(0)); setArm('r', new Array(7).fill(0)); targetMarker.visible = false; $('ikmsg').textContent = ''; };
+$('home').onclick = () => { for (const k of ['tl', 'tr']) setArm(k, new Array(10).fill(0)); setArm('l', new Array(7).fill(0)); setArm('r', new Array(7).fill(0)); targetMarker.visible = false; $('ikmsg').textContent = ''; };
+$('torso').addEventListener('change', () => $('home').onclick());
 
 // ---------- point clouds ----------
 const COLORS = { left: new THREE.Color(0x4a90ff), right: new THREE.Color(0xff9f40), both: new THREE.Color(0x3ddc84) };
 const HL = new THREE.Color(0xffee00);
 const clouds = {}; // clouds[variant][name] = THREE.Points
 const pmat = name => new THREE.PointsMaterial({ size: 0.008, vertexColors: true, transparent: true, opacity: 0.55, depthWrite: false });
-for (const v of ['free', 'down']) {
+for (const v of ['free', 'down', 'tfree', 'tdown']) {
   clouds[v] = {};
   for (const n of ['left', 'right', 'both']) {
     const buf = await (await fetch(`data/${v}_${n}.bin`)).arrayBuffer();
@@ -146,14 +153,14 @@ for (const v of ['free', 'down']) {
   }
 }
 function refreshClouds() {
-  const v = $('variant').value;
+  const v = vkey();
   for (const vv in clouds) for (const n in clouds[vv]) clouds[vv][n].visible = vv === v && $('c_' + n).checked;
   for (const n of ['left', 'right', 'both']) $('n_' + n).textContent = `(${meta[v + '_' + n]} pts)`;
   const s = $('psize').value / 1000;
   for (const vv in clouds) for (const n in clouds[vv]) clouds[vv][n].material.size = s;
   updateRegion();
 }
-['variant', 'c_left', 'c_right', 'c_both', 'psize'].forEach(i => $(i).addEventListener('input', refreshClouds));
+['torso', 'variant', 'c_left', 'c_right', 'c_both', 'psize'].forEach(i => $(i).addEventListener('input', refreshClouds));
 
 // Shift+click on a visible point -> IK target
 const ray = new THREE.Raycaster(); ray.params.Points.threshold = 0.01;
@@ -161,7 +168,7 @@ renderer.domElement.addEventListener('pointerdown', ev => {
   if (!ev.shiftKey) return;
   const r = renderer.domElement.getBoundingClientRect();
   ray.setFromCamera(new THREE.Vector2(((ev.clientX - r.left) / r.width) * 2 - 1, -((ev.clientY - r.top) / r.height) * 2 + 1), camera);
-  const vis = Object.values(clouds[$('variant').value]).filter(p => p.visible);
+  const vis = Object.values(clouds[vkey()]).filter(p => p.visible);
   const hit = ray.intersectObjects(vis)[0];
   if (!hit) return;
   const a = hit.object.geometry.attributes.position, t = [a.getX(hit.index), a.getY(hit.index), a.getZ(hit.index)];
@@ -226,7 +233,7 @@ function updateRegion() {
   regMesh.quaternion.setFromEuler(new THREE.Euler(reg.rpy[0] * DEG, reg.rpy[1] * DEG, reg.rpy[2] * DEG, 'ZYX')); // URDF rpy convention
   const d = reg.dims[reg.type];
   regMesh.scale.set(...(reg.type === 'sphere' ? [d[0], d[0], d[0]] : d));
-  const v = $('variant').value, on = $('c_region').checked, hl = on && $('c_hl').checked;
+  const v = vkey(), on = $('c_region').checked, hl = on && $('c_hl').checked;
   const inv = new THREE.Matrix4().compose(regMesh.position, regMesh.quaternion, new THREE.Vector3(1, 1, 1)).invert();
   const p = new THREE.Vector3(); const counts = {};
   for (const n of ['left', 'right', 'both']) {
@@ -251,14 +258,15 @@ function updateRegion() {
   window.regionCounts = counts;
 }
 $('dl').onclick = () => {
-  const v = $('variant').value, q = regMesh.quaternion;
+  const v = vkey(), q = regMesh.quaternion;
   const out = {
     type: reg.type, frame: 'root_link', units: 'm', center: reg.center,
     dims: reg.type === 'box' ? { size_xyz: reg.dims.box } : reg.type === 'sphere' ? { radius: reg.dims.sphere[0] } : { semi_axes_abc: reg.dims.ellipsoid },
     orientation: { rpy_deg: reg.rpy, rpy_convention: 'URDF (R = Rz(yaw) Ry(pitch) Rx(roll)), fixed axes of root_link', quaternion_xyzw: [q.x, q.y, q.z, q.w] },
-    reachability_variant: v === 'free' ? 'position only, orientation free' : 'palm down, fingers forward (±10 deg)',
+    reachability_variant: (v.endsWith('free') ? 'position only, orientation free' : 'palm down, fingers forward (±10 deg)') +
+      (v[0] === 't' ? '; torso joints used (roll ±23, pitch -18..45, yaw ±43 deg)' : '; torso locked at 0'),
     reachable_counts: window.regionCounts,
-    notes: 'ergoCub, torso locked at 0, fixed root; end-effector = l/r_hand_palm origin; grid 2 cm; reachable if IK position error < 1 cm',
+    notes: 'ergoCub, fixed root (root_link); end-effector = l/r_hand_palm origin; grid 2 cm; reachable if IK position error < 1 cm',
   };
   if ($('c_dlpts').checked) {
     out.reachable_points = {};
@@ -277,15 +285,16 @@ renderer.setAnimationLoop(() => renderer.render(scene, camera));
 
 // ---------- self-test / screenshot presets: index.html?test , ?region ----------
 const qs = new URLSearchParams(location.search);
-if (qs.has('test') || qs.has('region') || qs.has('down') || qs.has('ik')) {
+if (qs.has('test') || qs.has('region') || qs.has('down') || qs.has('locked') || qs.has('ik')) {
   while (!robot) await new Promise(r => setTimeout(r, 100));
   if (qs.has('down')) { $('variant').value = 'down'; refreshClouds(); }
+  if (qs.has('locked')) { $('torso').value = 'locked'; refreshClouds(); }
   if (qs.has('region')) { $('c_region').checked = true; $('c_region').onchange(); $('c_both').checked = true; refreshClouds(); }
   const out = [];
   for (const [side, t] of [['l', [0.25, 0.25, 0.35]], ['r', [0.2, -0.3, 0.2]], ['l', [0.9, 0.0, 0.3]]]) {
     $('arm').value = side; goTo(t);
     const w = new THREE.Vector3(); robot.links[side + '_hand_palm'].getWorldPosition(w); world.worldToLocal(w);
-    const p = fk(chains[side], window.lastIK.q).p;
+    const p = fk(chains[tk() + side], window.lastIK.q).p;
     out.push(`${side} target ${t} ik_err ${window.lastIK.err.toFixed(4)} urdf-vs-fk ${Math.hypot(w.x - p[0], w.y - p[1], w.z - p[2]).toExponential(2)}`);
   }
   $('dl').onclick.toString();

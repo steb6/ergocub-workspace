@@ -2,7 +2,7 @@
 <html lang="en">
 <head>
 <meta charset="utf-8">
-<title>ergoCub reachable workspace (torso fixed)</title>
+<title>ergoCub reachable workspace</title>
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <style>
   body { margin: 0; font: 13px system-ui, sans-serif; overflow: hidden; background: #1d2026; color: #ddd; }
@@ -32,10 +32,12 @@
 <div id="view"><div id="loading">loading robot…</div></div>
 <div id="panel">
   <h1>ergoCub reachable workspace</h1>
-  <small>Torso locked (roll/pitch/yaw = 0), fixed root. Frame <b>root_link</b> (x forward, y left, z up), metres.
+  <small>Fixed root (pelvis does not move); torso joints free within their limits, or locked at 0. Frame <b>root_link</b> (x forward, y left, z up), metres.
   Target = origin of <code>l/r_hand_palm</code> (the ergocub-cartesian-control end-effector).</small>
 
   <h2>Reachable points</h2>
+  <div class="row"><label class="k">torso</label>
+    <select id="torso"><option value="free">torso joints used (roll, pitch, yaw)</option><option value="locked">torso locked at 0</option></select></div>
   <div class="row"><label class="k">variant</label>
     <select id="variant"><option value="free">position only (orientation free)</option>
     <option value="down">palm down, fingers forward (±10°)</option></select></div>

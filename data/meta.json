@@ -4,12 +4,18 @@
  "step": 0.02,
  "tol_pos": 0.01,
  "tol_rot_deg": 10,
- "torso": "locked at 0 (torso_roll, torso_pitch, torso_yaw)",
+ "torso": "free*/down*: locked at 0; tfree*/tdown*: torso_roll/pitch/yaw free within control-board limits",
  "model": "ergoCubGazeboV1_1",
  "free_left": 11999,
  "free_right": 12000,
  "free_both": 1525,
  "down_left": 3385,
  "down_right": 3387,
- "down_both": 0
+ "down_both": 0,
+ "tfree_left": 75830,
+ "tfree_right": 75809,
+ "tfree_both": 42240,
+ "tdown_left": 29788,
+ "tdown_right": 29742,
+ "tdown_both": 7895
 }
