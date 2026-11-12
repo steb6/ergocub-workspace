@@ -40,8 +40,8 @@ new URDFLoader().load('ergocub.urdf', r => {
 $('c_robot').onchange = e => { if (robot) robot.visible = e.target.checked; };
 
 // ---------- arm chains (same as offline: ergocub-cartesian-control chain + control-board limits) ----------
-const chains = await (await fetch('data/chains.json')).json();
-const meta = await (await fetch('data/meta.json')).json();
+const chains = await (await fetch('data/chains.json?v=2')).json();
+const meta = await (await fetch('data/meta.json?v=2')).json();
 const qcur = {}; for (const k in chains) qcur[k] = new Array(chains[k].joints.length).fill(0);
 const tk = () => $('torso').value === 'free' ? 't' : '';  // chain/cloud prefix: '' torso locked, 't' torso free
 const vkey = () => tk() + $('variant').value;
@@ -141,7 +141,7 @@ const pmat = name => new THREE.PointsMaterial({ size: 0.008, vertexColors: true,
 for (const v of ['free', 'down', 'tfree', 'tdown']) {
   clouds[v] = {};
   for (const n of ['left', 'right', 'both']) {
-    const buf = await (await fetch(`data/${v}_${n}.bin`)).arrayBuffer();
+    const buf = await (await fetch(`data/${v}_${n}.bin?v=2`)).arrayBuffer();
     const idx = new Int16Array(buf), pos = new Float32Array(idx.length);
     for (let i = 0; i < idx.length; i++) pos[i] = idx[i] * meta.step;
     const g = new THREE.BufferGeometry();
