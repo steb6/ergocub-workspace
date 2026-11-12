@@ -1,0 +1,70 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>ergoCub reachable workspace (torso fixed)</title>
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<style>
+  body { margin: 0; font: 13px system-ui, sans-serif; overflow: hidden; background: #1d2026; color: #ddd; }
+  #view { position: absolute; inset: 0 330px 0 0; }
+  #panel { position: absolute; top: 0; right: 0; width: 330px; height: 100%; overflow-y: auto; box-sizing: border-box;
+           padding: 10px 12px; background: #262a31; border-left: 1px solid #3a3f48; }
+  h1 { font-size: 15px; margin: 0 0 4px; } h2 { font-size: 13px; margin: 14px 0 6px; color: #9cc3ff; }
+  .row { display: flex; align-items: center; gap: 6px; margin: 3px 0; }
+  .row label.k { width: 62px; color: #aaa; }
+  input[type=number] { width: 64px; background: #1d2026; color: #eee; border: 1px solid #444; padding: 2px; }
+  input[type=range] { flex: 1; }
+  button, select { background: #34465e; color: #eee; border: 1px solid #4b5f7a; padding: 3px 8px; cursor: pointer; }
+  .sw { display: inline-block; width: 10px; height: 10px; border-radius: 2px; }
+  #ikmsg, #regmsg { margin-top: 4px; padding: 4px; background: #1d2026; min-height: 16px; white-space: pre-line; }
+  .ok { color: #7fdc8a; } .bad { color: #ff8a7a; } small { color: #888; }
+  #loading { position: absolute; left: 20px; top: 20px; color: #aaa; }
+</style>
+<script type="importmap">
+{ "imports": {
+  "three": "https://cdn.jsdelivr.net/npm/three@0.160.0/build/three.module.js",
+  "three/examples/jsm/": "https://cdn.jsdelivr.net/npm/three@0.160.0/examples/jsm/",
+  "urdf-loader": "https://cdn.jsdelivr.net/npm/urdf-loader@0.12.3/src/URDFLoader.js"
+} }
+</script>
+</head>
+<body>
+<div id="view"><div id="loading">loading robot…</div></div>
+<div id="panel">
+  <h1>ergoCub reachable workspace</h1>
+  <small>Torso locked (roll/pitch/yaw = 0), fixed root. Frame <b>root_link</b> (x forward, y left, z up), metres.
+  Target = origin of <code>l/r_hand_palm</code> (the ergocub-cartesian-control end-effector).</small>
+
+  <h2>Reachable points</h2>
+  <div class="row"><label class="k">variant</label>
+    <select id="variant"><option value="free">position only (orientation free)</option>
+    <option value="down">palm down, fingers forward (±10°)</option></select></div>
+  <div class="row"><input type="checkbox" id="c_left" checked><span class="sw" style="background:#4a90ff"></span>left <span id="n_left"></span></div>
+  <div class="row"><input type="checkbox" id="c_right" checked><span class="sw" style="background:#ff9f40"></span>right <span id="n_right"></span></div>
+  <div class="row"><input type="checkbox" id="c_both"><span class="sw" style="background:#3ddc84"></span>both (intersection) <span id="n_both"></span></div>
+  <div class="row"><label class="k">point size</label><input type="range" id="psize" min="2" max="20" value="8"></div>
+  <div class="row"><input type="checkbox" id="c_robot" checked>robot visible</div>
+
+  <h2>Move an arm (in-browser IK)</h2>
+  <div class="row"><label class="k">arm</label><select id="arm"><option value="l">left</option><option value="r">right</option></select>
+    <select id="ikori"><option value="free">orientation free</option><option value="down">palm down</option></select></div>
+  <div class="row"><label class="k">target</label>
+    <input type="number" id="tx" step="0.01" value="0.25"><input type="number" id="ty" step="0.01" value="0.25"><input type="number" id="tz" step="0.01" value="0.35"></div>
+  <div class="row"><button id="go">Go</button><button id="home">Home</button><small>or Shift+click on a point</small></div>
+  <div id="ikmsg"></div>
+
+  <h2>Region</h2>
+  <div class="row"><input type="checkbox" id="c_region">show region
+    <select id="rtype"><option>box</option><option>sphere</option><option>ellipsoid</option></select></div>
+  <div class="row"><label class="k">gizmo</label><select id="gizmo"><option value="translate">move</option><option value="rotate">rotate</option><option value="off">off</option></select></div>
+  <div id="sliders"></div>
+  <div class="row"><input type="checkbox" id="c_hl" checked>highlight points inside</div>
+  <div id="regmsg"></div>
+  <div class="row"><input type="checkbox" id="c_dlpts">include points inside</div>
+  <div class="row"><button id="dl">Download region JSON</button></div>
+  <small>Grid 2 cm; a point is reachable if the controller-chain IK (ergocub-cartesian-control, same joint limits)
+    gets the palm within 1 cm. Drag to orbit, right-drag to pan, wheel to zoom.</small>
+</div>
+<script type="module" src="app.js"></script>
+</body>
+</html>
