@@ -55,6 +55,13 @@
   <div class="row"><button id="go">Go</button><button id="home">Home</button><small>or Shift+click on a point</small></div>
   <div id="ikmsg"></div>
 
+  <h2>Collaborator setup</h2>
+  <div class="row"><input type="checkbox" id="c_collab">seated user, facing ergoCub</div>
+  <small>Placement of root_link in user frame U (yaw 180°), metres.</small>
+  <div id="placement"></div>
+  <div id="pelvis_height"></div>
+  <small>No collision checking. Target = palm frame at the wrist; fingers ~10 cm further.</small>
+
   <h2>Region</h2>
   <div class="row"><input type="checkbox" id="c_region">show region
     <select id="rtype"><option>box</option><option>sphere</option><option>ellipsoid</option></select></div>
@@ -67,6 +74,6 @@
   <small>Grid 2 cm; a point is reachable if the controller-chain IK (ergocub-cartesian-control, same joint limits)
     gets the palm within 1 cm. Drag to orbit, right-drag to pan, wheel to zoom.</small>
 </div>
-<script type="module" src="app.js?v=2"></script>
+<script type="module" src="app.js?v=3"></script>
 </body>
 </html>

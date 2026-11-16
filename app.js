@@ -40,8 +40,8 @@ new URDFLoader().load('ergocub.urdf', r => {
 $('c_robot').onchange = e => { if (robot) robot.visible = e.target.checked; };
 
 // ---------- arm chains (same as offline: ergocub-cartesian-control chain + control-board limits) ----------
-const chains = await (await fetch('data/chains.json?v=2')).json();
-const meta = await (await fetch('data/meta.json?v=2')).json();
+const chains = await (await fetch('data/chains.json?v=3')).json();
+const meta = await (await fetch('data/meta.json?v=3')).json();
 const qcur = {}; for (const k in chains) qcur[k] = new Array(chains[k].joints.length).fill(0);
 const tk = () => $('torso').value === 'free' ? 't' : '';  // chain/cloud prefix: '' torso locked, 't' torso free
 const vkey = () => tk() + $('variant').value;
@@ -141,7 +141,7 @@ const pmat = name => new THREE.PointsMaterial({ size: 0.008, vertexColors: true,
 for (const v of ['free', 'down', 'tfree', 'tdown']) {
   clouds[v] = {};
   for (const n of ['left', 'right', 'both']) {
-    const buf = await (await fetch(`data/${v}_${n}.bin?v=2`)).arrayBuffer();
+    const buf = await (await fetch(`data/${v}_${n}.bin?v=3`)).arrayBuffer();
     const idx = new Int16Array(buf), pos = new Float32Array(idx.length);
     for (let i = 0; i < idx.length; i++) pos[i] = idx[i] * meta.step;
     const g = new THREE.BufferGeometry();
@@ -221,11 +221,80 @@ $('rtype').onchange = e => {
 };
 const applyGizmo = () => {
   const m = $('gizmo').value;
-  if (m === 'off' || !$('c_region').checked) gizmo.detach(); else { gizmo.attach(regMesh); gizmo.setMode(m); }
+  if ($('c_collab').checked || m === 'off' || !$('c_region').checked) gizmo.detach(); else { gizmo.attach(regMesh); gizmo.setMode(m); }
 };
 $('gizmo').onchange = applyGizmo;
 $('c_region').onchange = () => { regMesh.visible = $('c_region').checked; applyGizmo(); updateRegion(); };
 $('c_hl').onchange = () => updateRegion();
+
+// ---------- collaborator: geometry in U (x gaze, y left, z up) ----------
+const placement = { d: 0.71, y0: -0.20, h: 0.27 };
+const user = new THREE.Group(); user.rotation.z = Math.PI; user.visible = false; world.add(user);
+const humanMat = new THREE.MeshStandardMaterial({ color: 0xb5aea4, transparent: true, opacity: 0.6, roughness: 0.9 });
+const chairMat = new THREE.MeshStandardMaterial({ color: 0x777b82, transparent: true, opacity: 0.5 });
+function bodyPart(size, position, material = humanMat) {
+  const mesh = new THREE.Mesh(new THREE.BoxGeometry(...size), material);
+  mesh.position.set(...position); user.add(mesh); return mesh;
+}
+function limb(a, b, radius, material = humanMat) {
+  const mesh = new THREE.Mesh(new THREE.CylinderGeometry(radius, radius, 1, 12), material);
+  user.add(mesh); placeLimb(mesh, a, b); return mesh;
+}
+function placeLimb(mesh, a, b) {
+  const start = new THREE.Vector3(...a), end = new THREE.Vector3(...b), delta = end.clone().sub(start);
+  mesh.position.copy(start.add(end).multiplyScalar(0.5)); mesh.scale.y = delta.length();
+  mesh.quaternion.setFromUnitVectors(new THREE.Vector3(0, 1, 0), delta.normalize());
+}
+bodyPart([0.20, 0.30, 0.16], [0, 0, 0]);
+bodyPart([0.20, 0.36, 0.38], [-0.02, 0, 0.26]);
+limb([0, 0, 0.45], [0, 0, 0.52], 0.055);
+const head = new THREE.Mesh(new THREE.SphereGeometry(0.11, 20, 16), humanMat);
+head.position.set(0, 0, 0.63); head.scale.z = 1.2; user.add(head);
+bodyPart([0.05, 0.045, 0.045], [0.115, 0, 0.63]); // nose points along gaze
+bodyPart([0.48, 0.46, 0.05], [0.10, 0, -0.11], chairMat);
+bodyPart([0.05, 0.46, 0.43], [-0.15, 0, 0.12], chairMat);
+const shanks = [], feet = [], chairLegs = [];
+for (const y of [-0.12, 0.12]) {
+  limb([0, y, 0], [0.36, y, -0.03], 0.075);
+  shanks.push(limb([0.36, y, -0.03], [0.36, y, -0.46], 0.05));
+  feet.push(bodyPart([0.23, 0.10, 0.06], [0.43, y, -0.48]));
+  limb([0, y * 1.8, 0.42], [0.10, y * 1.8, 0.16], 0.043);
+  limb([0.10, y * 1.8, 0.16], [0.32, y, 0.08], 0.035);
+  for (const x of [-0.10, 0.30]) chairLegs.push({ mesh: limb([x, y * 1.6, -0.13], [x, y * 1.6, -0.5], 0.018, chairMat), x, y: y * 1.6 });
+}
+user.add(new THREE.AxesHelper(0.22));
+const labelCanvas = document.createElement('canvas'); labelCanvas.width = 256; labelCanvas.height = 48;
+const labelContext = labelCanvas.getContext('2d'); labelContext.font = '28px sans-serif'; labelContext.fillStyle = '#ffffff';
+labelContext.fillText('user pelvis', 5, 34);
+const label = new THREE.Sprite(new THREE.SpriteMaterial({ map: new THREE.CanvasTexture(labelCanvas), depthTest: false }));
+label.position.set(-0.10, -0.30, 0.02); label.scale.set(0.34, 0.064, 1); user.add(label);
+function updatePlacement() {
+  const { d, y0, h } = placement, floor = h - 0.779;
+  user.position.set(d, y0, -h);
+  shanks.forEach((mesh, k) => placeLimb(mesh, [0.36, [-0.12, 0.12][k], -0.03], [0.36, [-0.12, 0.12][k], floor + 0.06]));
+  feet.forEach(mesh => mesh.position.z = floor + 0.03);
+  chairLegs.forEach(({ mesh, x, y }) => placeLimb(mesh, [x, y, -0.13], [x, y, floor]));
+  $('pelvis_height').textContent = `User pelvis above floor: ${(0.779 - h).toFixed(3)} m`;
+  if ($('c_collab').checked) {
+    reg.center = [d - 0.35, y0 + 0.20, 0.55 - h].map(v => +v.toFixed(3));
+    reg.dims.box = [0.30, 0.60, 0.40]; reg.rpy = [0, 0, 0]; syncSliders();
+  }
+}
+for (const [key, min, max] of [['d', 0.4, 1.2], ['y0', -0.5, 0.5], ['h', 0, 0.6]]) {
+  const row = sliderRow(key, () => placement[key], v => { placement[key] = Number.isFinite(v) ? Math.min(max, Math.max(min, v)) : placement[key]; updatePlacement(); }, min, max, 0.01);
+  $('placement').appendChild(row); row.sync();
+}
+$('c_collab').onchange = () => {
+  const on = $('c_collab').checked; user.visible = on; grid.position.z = on ? -0.779 : 0;
+  if (on) {
+    $('rtype').value = 'box'; $('rtype').onchange({ target: $('rtype') });
+    $('c_region').checked = $('c_hl').checked = true;
+    camera.position.set(1.7, 1.0, 1.8); orbit.target.set(0.35, -0.12, 0.05); orbit.update();
+  }
+  document.querySelectorAll('#sliders input, #rtype, #gizmo, #c_region, #c_hl').forEach(el => el.disabled = on);
+  updatePlacement(); $('c_region').onchange();
+};
+updatePlacement();
 
 const insideIdx = {};
 function updateRegion() {
@@ -242,7 +311,7 @@ function updateRegion() {
       let inside = false;
       if (on) {
         p.fromBufferAttribute(a, i).applyMatrix4(inv);
-        if (reg.type === 'box') inside = Math.abs(p.x) <= d[0] / 2 && Math.abs(p.y) <= d[1] / 2 && Math.abs(p.z) <= d[2] / 2;
+        if (reg.type === 'box') inside = Math.abs(p.x) <= d[0] / 2 + 1e-7 && Math.abs(p.y) <= d[1] / 2 + 1e-7 && Math.abs(p.z) <= d[2] / 2 + 1e-7;
         else if (reg.type === 'sphere') inside = p.length() <= d[0];
         else inside = (p.x / d[0]) ** 2 + (p.y / d[1]) ** 2 + (p.z / d[2]) ** 2 <= 1;
       }
@@ -252,9 +321,15 @@ function updateRegion() {
     c.needsUpdate = true; counts[n] = insideIdx[n].length;
   }
   const vol = reg.type === 'box' ? d[0] * d[1] * d[2] : reg.type === 'sphere' ? 4 / 3 * Math.PI * d[0] ** 3 : 4 / 3 * Math.PI * d[0] * d[1] * d[2];
-  const nGrid = vol / meta.step ** 3;
-  $('regmsg').innerHTML = on ? `region volume ${(vol * 1000).toFixed(1)} L ≈ ${nGrid.toFixed(0)} grid cells\n` +
-    ['left', 'right', 'both'].map(n => `${n}: ${counts[n]} reachable (${(100 * counts[n] / nGrid).toFixed(0)}% of region)`).join('\n') : '';
+  // Axis-aligned boxes: count lattice samples, including boundary points (not volume / cell volume).
+  const exactGrid = reg.type === 'box' && reg.rpy.every(v => v === 0);
+  const nGrid = exactGrid ? d.reduce((n, size, k) => n * Math.max(0,
+    Math.floor((reg.center[k] + size / 2 + 1e-7) / meta.step) - Math.ceil((reg.center[k] - size / 2 - 1e-7) / meta.step) + 1), 1) : vol / meta.step ** 3;
+  counts.union = counts.left + counts.right - counts.both;
+  window.regionCoverage = { grid_samples: nGrid, denominator: exactGrid ? 'lattice points inside, boundaries included' : 'approximate volume / grid cell volume',
+    counts, fractions: Object.fromEntries(Object.entries(counts).map(([n, c]) => [n, nGrid ? c / nGrid : 0])) };
+  $('regmsg').innerHTML = on ? `region volume ${(vol * 1000).toFixed(1)} L; ${exactGrid ? '' : '≈ '}${nGrid.toFixed(0)} grid samples\n` +
+    ['left', 'right', 'both', 'union'].map(n => `${n}: ${counts[n]} reachable (${(100 * window.regionCoverage.fractions[n]).toFixed(0)}% of region)`).join('\n') : '';
   window.regionCounts = counts;
 }
 $('dl').onclick = () => {
@@ -268,6 +343,16 @@ $('dl').onclick = () => {
     reachable_counts: window.regionCounts,
     notes: 'ergoCub, fixed root (root_link); end-effector = l/r_hand_palm origin; grid 2 cm; reachable if IK position error < 1 cm',
   };
+  if ($('c_collab').checked) out.collaborator = {
+    frame_U: { origin: 'seated user pelvis', axes: { x: 'user gaze', y: 'user left', z: 'up' }, units: 'm' },
+    box_U: { center: [0.35, -0.20, 0.55], size_xyz: [0.30, 0.60, 0.40], rpy_deg: [0, 0, 0] },
+    box_root_link: { center: reg.center, size_xyz: reg.dims.box, rpy_deg: reg.rpy },
+    placement: { root_link_in_U: { position: [placement.d, placement.y0, placement.h], yaw_deg: 180 },
+      user_pelvis_in_root_link: { position: [placement.d, placement.y0, -placement.h], yaw_deg: 180 },
+      pelvis_height_above_floor: 0.779 - placement.h, floor_z_root_link: -0.779 },
+    coverage: window.regionCoverage,
+    notes: 'No collision checking; target = palm frame at wrist, fingers approximately 10 cm further',
+  };
   if ($('c_dlpts').checked) {
     out.reachable_points = {};
     for (const n of ['left', 'right', 'both']) {
@@ -280,11 +365,12 @@ $('dl').onclick = () => {
 };
 
 buildSliders(); refreshClouds();
-window.app = { goTo, fk, chains, reg, updateRegion, clouds };
+window.app = { goTo, fk, chains, reg, updateRegion, clouds, placement, user };
 renderer.setAnimationLoop(() => renderer.render(scene, camera));
 
 // ---------- self-test / screenshot presets: index.html?test , ?region ----------
 const qs = new URLSearchParams(location.search);
+if (qs.has('collab')) { $('c_collab').checked = true; $('c_collab').onchange(); }
 if (qs.has('test') || qs.has('region') || qs.has('down') || qs.has('locked') || qs.has('ik')) {
   while (!robot) await new Promise(r => setTimeout(r, 100));
   if (qs.has('down')) { $('variant').value = 'down'; refreshClouds(); }
