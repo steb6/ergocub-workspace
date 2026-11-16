@@ -52,7 +52,7 @@ export function createPlacementSearch(left, right, step = 0.02) {
     const minD = box.center[0] + box.size[0] / 2 + 0.15;
     for (let di = 25; di <= 60; di++) {
       const d = di * 0.02; if (d + 1e-9 < minD) continue;
-      for (let yi = -25; yi <= 25; yi++) for (let hi = 0; hi <= 30; hi++) {
+      for (let yi = -25; yi <= 25; yi++) for (let hi = 12; hi <= 16; hi++) { // seated user: pelvis 0.46-0.54 m above floor
         const placement = { d: +d.toFixed(2), y0: +(yi * 0.02).toFixed(2), h: +(hi * 0.02).toFixed(2) };
         const c = coverage(box, placement); candidates++;
         if (!best || c.fractions.union > best.coverage.fractions.union ||
