@@ -1,4 +1,5 @@
-import { createPlacementSearch } from './placement.js?v=4';
+import { createExperiment } from './experiment.js?v=5';
+import { createPlacementSearch } from './placement.js?v=5';
 import * as THREE from 'three';
 import { OrbitControls } from 'three/examples/jsm/controls/OrbitControls.js';
 import { TransformControls } from 'three/examples/jsm/controls/TransformControls.js';
@@ -41,8 +42,8 @@ new URDFLoader().load('ergocub.urdf', r => {
 $('c_robot').onchange = e => { if (robot) robot.visible = e.target.checked; };
 
 // ---------- arm chains (same as offline: ergocub-cartesian-control chain + control-board limits) ----------
-const chains = await (await fetch('data/chains.json?v=4')).json();
-const meta = await (await fetch('data/meta.json?v=4')).json();
+const chains = await (await fetch('data/chains.json?v=5')).json();
+const meta = await (await fetch('data/meta.json?v=5')).json();
 const qcur = {}; for (const k in chains) qcur[k] = new Array(chains[k].joints.length).fill(0);
 const tk = () => $('torso').value === 'free' ? 't' : '';  // chain/cloud prefix: '' torso locked, 't' torso free
 const vkey = () => tk() + $('variant').value;
@@ -86,16 +87,17 @@ const rotErr = (Rd, R) => { const E = mm(Rd, T3(R)); return [0.5 * (E[2][1] - E[
 const rotAngle = (Rd, R) => { const E = mm(Rd, T3(R)); return Math.acos(Math.min(1, Math.max(-1, (E[0][0] + E[1][1] + E[2][2] - 1) / 2))); };
 
 // damped least squares + joint-limit clamping, several seeds (same scheme as the offline grid)
-function ik(side, target, Rd) {
+function ik(side, target, Rd, options = {}) {
   const key = tk() + side, ch = chains[key], lo = ch.qmin, hi = ch.qmax, wr = 0.3;
   const seeds = [qcur[key].slice(), lo.map(() => 0), lo.map((l, i) => (l + hi[i]) / 2)];
-  for (let k = 0; k < 25; k++) seeds.push(lo.map((l, i) => l + Math.random() * (hi[i] - l)));
+  for (let k = 0; k < (options.randomSeeds ?? 25); k++) seeds.push(lo.map((l, i) => l + Math.random() * (hi[i] - l)));
   let best = null;
   for (const s of seeds) {
     let q = s.map((v, i) => Math.min(hi[i], Math.max(lo[i], v)));
-    for (let it = 0; it < 200; it++) {
+    for (let it = 0; it < (options.iterations ?? 200); it++) {
       const { p, R, J } = fk(ch, q);
       let e = target.map((v, k) => v - p[k]), Jt = J.slice(0, 3);
+      if (Math.hypot(...e) < 0.001 && (!Rd || rotAngle(Rd, R) < 3 * DEG)) break;
       if (Rd) { e = e.concat(rotErr(Rd, R).map(v => wr * v)); Jt = Jt.concat(J.slice(3).map(r => r.map(v => wr * v))); }
       const A = Jt.map(r => Jt.map(r2 => r.reduce((s2, v, k) => s2 + v * r2[k], 0)));
       A.forEach((r, i) => r[i] += 0.02 * 0.02);
@@ -142,7 +144,7 @@ const pmat = name => new THREE.PointsMaterial({ size: 0.008, vertexColors: true,
 for (const v of ['free', 'down', 'tfree', 'tdown']) {
   clouds[v] = {};
   for (const n of ['left', 'right', 'both']) {
-    const buf = await (await fetch(`data/${v}_${n}.bin?v=4`)).arrayBuffer();
+    const buf = await (await fetch(`data/${v}_${n}.bin?v=5`)).arrayBuffer();
     const idx = new Int16Array(buf), pos = new Float32Array(idx.length);
     for (let i = 0; i < idx.length; i++) pos[i] = idx[i] * meta.step;
     const g = new THREE.BufferGeometry();
@@ -443,10 +445,62 @@ buildSliders(); refreshClouds();
 window.app = { goTo, fk, chains, reg, updateRegion, clouds, placement, user, boxU, updatePlacement, bestPlacement };
 renderer.setAnimationLoop(() => renderer.render(scene, camera));
 
+
+// Experiment target pool is the cloud/box intersection; every cached target
+// additionally passes the real controller-chain IK before being observed.
+const experiment = createExperiment({
+  user, world, enabled: () => $('c_collab').checked,
+  box: () => boxU, placement: () => placement, torso: () => $('torso').value,
+  drawHuman(points) {
+    placeLimb(rightUpper, points[0], points[1]);
+    placeLimb(rightForearm, points[1], points[2]);
+    rightHand.position.set(...points[2].map((v,k) => (v+points[3][k])/2));
+    // Existing hand geometry has its long direction on x; orient it along wrist–tip.
+    rightHand.quaternion.setFromUnitVectors(new THREE.Vector3(1,0,0), new THREE.Vector3(...points[3]).sub(new THREE.Vector3(...points[2])).normalize());
+  },
+  // All reachable cloud points (current torso mode, position-only) inside the box, in U and root frames.
+  candidatePool() {
+    const entries = new Map();
+    for (const [name, side] of [['left','l'],['right','r']]) {
+      const data = clouds[tk()+'free'][name].geometry.attributes.position;
+      for (let i=0;i<data.count;i++) {
+        const root=[data.getX(i),data.getY(i),data.getZ(i)];
+        const pose=[placement.d-root[0],placement.y0-root[1],root[2]+placement.h];
+        if (!pose.every((v,k) => Math.abs(v-boxU.center[k]) <= boxU.size[k]/2+1e-8)) continue;
+        const key=root.map(v=>v.toFixed(4)).join(',');
+        if (!entries.has(key)) entries.set(key,{pose,root,sides:[]});
+        entries.get(key).sides.push(side);
+      }
+    }
+    return [...entries.values()];
+  },
+  plan(candidate) {
+    if(!robot) return null;
+    const near = candidate.root[1] > 0 ? 'l' : 'r';  // try the arm on the target's side first
+    for(const side of [...candidate.sides].sort((a,b)=>(b===near)-(a===near))) {
+      const b=ik(side,candidate.root,null,{randomSeeds:3,iterations:100});
+      if(b.err<0.01) return {...b,side,key:tk()+side,target:candidate.root.slice()};
+    }
+    return null;
+  },
+  resetHuman: () => updatePlacement(),
+  current: plan => qcur[plan.key].slice(),
+  apply: (plan,q) => setArm(plan.key,q),
+  palmPosition: plan => fk(chains[plan.key],qcur[plan.key]).p,
+});
+window.experiment = experiment;
+
 // ---------- self-test / screenshot presets: index.html?test , ?region ----------
 const qs = new URLSearchParams(location.search);
 if (qs.has('collab')) { $('c_collab').checked = true; $('c_collab').onchange(); }
 if (qs.has('collab') && qs.has('best')) bestPlacement();
+if (qs.has('collab') && qs.has('exp')) {  // e.g. ?collab&exp&preset=elbow&policy=active&n=25&seed=7&fast
+  while (!robot) await new Promise(r => setTimeout(r, 100));
+  ['c_left', 'c_right'].forEach(i => $(i).checked = false); refreshClouds();  // declutter the view for the run
+  $('experiment').scrollIntoView();
+  experiment.configure(Object.fromEntries(qs));
+  experiment.start();
+}
 if (qs.has('test') || qs.has('region') || qs.has('down') || qs.has('locked') || qs.has('ik')) {
   while (!robot) await new Promise(r => setTimeout(r, 100));
   if (qs.has('down')) { $('variant').value = 'down'; refreshClouds(); }
