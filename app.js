@@ -1,3 +1,4 @@
+import { createPlacementSearch } from './placement.js?v=4';
 import * as THREE from 'three';
 import { OrbitControls } from 'three/examples/jsm/controls/OrbitControls.js';
 import { TransformControls } from 'three/examples/jsm/controls/TransformControls.js';
@@ -40,8 +41,8 @@ new URDFLoader().load('ergocub.urdf', r => {
 $('c_robot').onchange = e => { if (robot) robot.visible = e.target.checked; };
 
 // ---------- arm chains (same as offline: ergocub-cartesian-control chain + control-board limits) ----------
-const chains = await (await fetch('data/chains.json?v=3')).json();
-const meta = await (await fetch('data/meta.json?v=3')).json();
+const chains = await (await fetch('data/chains.json?v=4')).json();
+const meta = await (await fetch('data/meta.json?v=4')).json();
 const qcur = {}; for (const k in chains) qcur[k] = new Array(chains[k].joints.length).fill(0);
 const tk = () => $('torso').value === 'free' ? 't' : '';  // chain/cloud prefix: '' torso locked, 't' torso free
 const vkey = () => tk() + $('variant').value;
@@ -141,7 +142,7 @@ const pmat = name => new THREE.PointsMaterial({ size: 0.008, vertexColors: true,
 for (const v of ['free', 'down', 'tfree', 'tdown']) {
   clouds[v] = {};
   for (const n of ['left', 'right', 'both']) {
-    const buf = await (await fetch(`data/${v}_${n}.bin?v=3`)).arrayBuffer();
+    const buf = await (await fetch(`data/${v}_${n}.bin?v=4`)).arrayBuffer();
     const idx = new Int16Array(buf), pos = new Float32Array(idx.length);
     for (let i = 0; i < idx.length; i++) pos[i] = idx[i] * meta.step;
     const g = new THREE.BufferGeometry();
@@ -149,6 +150,7 @@ for (const v of ['free', 'down', 'tfree', 'tdown']) {
     const col = new Float32Array(pos.length); for (let i = 0; i < pos.length; i += 3) COLORS[n].toArray(col, i);
     g.setAttribute('color', new THREE.BufferAttribute(col, 3));
     const pts = new THREE.Points(g, pmat(n)); pts.name = n; pts.visible = false;
+    pts.userData.indices = idx;
     clouds[v][n] = pts; world.add(pts);
   }
 }
@@ -229,6 +231,8 @@ $('c_hl').onchange = () => updateRegion();
 
 // ---------- collaborator: geometry in U (x gaze, y left, z up) ----------
 const placement = { d: 0.71, y0: -0.20, h: 0.27 };
+const boxU = { center: [0.45, -0.20, 0.45], size: [0.30, 0.60, 0.40] };
+const placementRows = [], boxRows = [];
 const user = new THREE.Group(); user.rotation.z = Math.PI; user.visible = false; world.add(user);
 const humanMat = new THREE.MeshStandardMaterial({ color: 0xb5aea4, transparent: true, opacity: 0.6, roughness: 0.9 });
 const chairMat = new THREE.MeshStandardMaterial({ color: 0x777b82, transparent: true, opacity: 0.5 });
@@ -258,10 +262,18 @@ for (const y of [-0.12, 0.12]) {
   limb([0, y, 0], [0.36, y, -0.03], 0.075);
   shanks.push(limb([0.36, y, -0.03], [0.36, y, -0.46], 0.05));
   feet.push(bodyPart([0.23, 0.10, 0.06], [0.43, y, -0.48]));
-  limb([0, y * 1.8, 0.42], [0.10, y * 1.8, 0.16], 0.043);
-  limb([0.10, y * 1.8, 0.16], [0.32, y, 0.08], 0.035);
+  if (y > 0) { // left arm rests on the lap
+    limb([0, y * 1.8, 0.42], [0.10, y * 1.8, 0.16], 0.043);
+    limb([0.10, y * 1.8, 0.16], [0.32, y, 0.08], 0.035);
+  }
   for (const x of [-0.10, 0.30]) chairLegs.push({ mesh: limb([x, y * 1.6, -0.13], [x, y * 1.6, -0.5], 0.018, chairMat), x, y: y * 1.6 });
 }
+const rightUpper = limb([0, -0.216, 0.42], [0.25, -0.22, 0.30], 0.043);
+const rightForearm = limb([0.25, -0.22, 0.30], [0.45, -0.20, 0.29], 0.035);
+const rightHand = bodyPart([0.11, 0.075, 0.035], [0.45, -0.20, 0.29]);
+const tableMat = new THREE.MeshStandardMaterial({ color: 0x90969d, transparent: true, opacity: 0.35, depthWrite: false });
+const tableTop = bodyPart([1, 1, 1], [0, 0, 0], tableMat);
+const tableLegs = Array.from({ length: 4 }, () => bodyPart([1, 1, 1], [0, 0, 0], tableMat));
 user.add(new THREE.AxesHelper(0.22));
 const labelCanvas = document.createElement('canvas'); labelCanvas.width = 256; labelCanvas.height = 48;
 const labelContext = labelCanvas.getContext('2d'); labelContext.font = '28px sans-serif'; labelContext.fillStyle = '#ffffff';
@@ -275,17 +287,52 @@ function updatePlacement() {
   feet.forEach(mesh => mesh.position.z = floor + 0.03);
   chairLegs.forEach(({ mesh, x, y }) => placeLimb(mesh, [x, y, -0.13], [x, y, floor]));
   $('pelvis_height').textContent = `User pelvis above floor: ${(0.779 - h).toFixed(3)} m`;
+  const surface = boxU.center[2] - boxU.size[2] / 2;
+  const xMin = 0.15, xMax = d - 0.15, width = 0.9;
+  tableTop.position.set((xMin + xMax) / 2, boxU.center[1], surface - 0.015);
+  tableTop.scale.set(Math.max(0.01, xMax - xMin), width, 0.03);
+  const legHeight = Math.max(0, surface - 0.03 - floor);
+  tableLegs.forEach((mesh, i) => {
+    mesh.position.set(i < 2 ? xMin + 0.025 : xMax - 0.025,
+      boxU.center[1] + (i % 2 ? 1 : -1) * (width / 2 - 0.025), floor + legHeight / 2);
+    mesh.scale.set(0.035, 0.035, legHeight);
+    mesh.visible = $('c_table').checked && legHeight > 0;
+  });
+  tableTop.visible = $('c_table').checked;
+  const hand = [boxU.center[0], boxU.center[1], surface + 0.045];
+  const elbow = [hand[0] * 0.52, -0.216 + (hand[1] + 0.216) * 0.5, (0.42 + hand[2]) / 2 + 0.025];
+  placeLimb(rightUpper, [0, -0.216, 0.42], elbow);
+  placeLimb(rightForearm, elbow, hand); rightHand.position.set(...hand);
   if ($('c_collab').checked) {
-    reg.center = [d - 0.35, y0 + 0.20, 0.55 - h].map(v => +v.toFixed(3));
-    reg.dims.box = [0.30, 0.60, 0.40]; reg.rpy = [0, 0, 0]; syncSliders();
+    reg.center = [d - boxU.center[0], y0 - boxU.center[1], boxU.center[2] - h].map(v => +v.toFixed(6));
+    reg.dims.box = boxU.size.slice(); reg.rpy = [0, 0, 0]; syncSliders();
   }
+  $('bestmsg').textContent = ''; window.bestPlacement = null;
 }
-for (const [key, min, max] of [['d', 0.4, 1.2], ['y0', -0.5, 0.5], ['h', 0, 0.6]]) {
+for (const [key, min, max] of [['d', 0.5, 1.2], ['y0', -0.5, 0.5], ['h', 0, 0.6]]) {
   const row = sliderRow(key, () => placement[key], v => { placement[key] = Number.isFinite(v) ? Math.min(max, Math.max(min, v)) : placement[key]; updatePlacement(); }, min, max, 0.01);
-  $('placement').appendChild(row); row.sync();
+  $('placement').appendChild(row); placementRows.push(row); row.sync();
 }
+for (const [field, label, min, max] of [['center', 'centre', -0.8, 1.2], ['size', 'size', 0.02, 1.2]]) {
+  ['x', 'y', 'z'].forEach((axis, k) => {
+    const row = sliderRow(`${label} ${axis}${field === 'center' ? '_U' : ''}`, () => boxU[field][k], v => {
+      if (Number.isFinite(v)) boxU[field][k] = Math.min(max, Math.max(min, v));
+      updatePlacement();
+    }, min, max, 0.01);
+    $('collab_box').appendChild(row); boxRows.push(row); row.sync();
+  });
+}
+$('standing_box').onclick = () => {
+  boxU.center = [0.35, -0.20, 0.55]; boxU.size = [0.30, 0.60, 0.40];
+  boxRows.forEach(row => row.sync()); updatePlacement(); updateRegion();
+};
+$('c_table').onchange = () => { updatePlacement(); updateRegion(); };
+function enableCollaboratorControls(on) {
+  document.querySelectorAll('#collab_box input, #standing_box, #c_table, #best_placement').forEach(el => el.disabled = !on);
+}
+enableCollaboratorControls(false);
 $('c_collab').onchange = () => {
-  const on = $('c_collab').checked; user.visible = on; grid.position.z = on ? -0.779 : 0;
+  const on = $('c_collab').checked; enableCollaboratorControls(on); user.visible = on; grid.position.z = on ? -0.779 : 0;
   if (on) {
     $('rtype').value = 'box'; $('rtype').onchange({ target: $('rtype') });
     $('c_region').checked = $('c_hl').checked = true;
@@ -332,6 +379,31 @@ function updateRegion() {
     ['left', 'right', 'both', 'union'].map(n => `${n}: ${counts[n]} reachable (${(100 * window.regionCoverage.fractions[n]).toFixed(0)}% of region)`).join('\n') : '';
   window.regionCounts = counts;
 }
+const placementSearches = {};
+function bestPlacement() {
+  const started = performance.now(), v = vkey();
+  if (!placementSearches[v]) placementSearches[v] = createPlacementSearch(
+    clouds[v].left.userData.indices, clouds[v].right.userData.indices, meta.step);
+  const result = placementSearches[v].findBest(boxU);
+  if (!result) {
+    window.bestPlacement = null;
+    $('bestmsg').textContent = 'No feasible placement: box far face + 0.15 m exceeds d = 1.20 m.';
+    return null;
+  }
+  Object.assign(placement, result.placement);
+  placementRows.forEach(row => row.sync()); updatePlacement(); updateRegion();
+  result.elapsed_ms = performance.now() - started; result.variant = v;
+  window.bestPlacement = result;
+  $('bestmsg').textContent = `Best d=${placement.d.toFixed(2)}, y0=${placement.y0.toFixed(2)}, h=${placement.h.toFixed(2)} m\n` +
+    `union ${(100 * result.coverage.fractions.union).toFixed(2)}%; both ${(100 * result.coverage.fractions.both).toFixed(2)}%\n` +
+    `${result.candidates} placements; ${result.elapsed_ms.toFixed(0)} ms`;
+  return result;
+}
+$('best_placement').onclick = bestPlacement;
+['torso', 'variant'].forEach(id => $(id).addEventListener('input', () => {
+  $('bestmsg').textContent = ''; window.bestPlacement = null;
+}));
+
 $('dl').onclick = () => {
   const v = vkey(), q = regMesh.quaternion;
   const out = {
@@ -345,7 +417,8 @@ $('dl').onclick = () => {
   };
   if ($('c_collab').checked) out.collaborator = {
     frame_U: { origin: 'seated user pelvis', axes: { x: 'user gaze', y: 'user left', z: 'up' }, units: 'm' },
-    box_U: { center: [0.35, -0.20, 0.55], size_xyz: [0.30, 0.60, 0.40], rpy_deg: [0, 0, 0] },
+    box_U: { center: boxU.center.slice(), size_xyz: boxU.size.slice(), rpy_deg: [0, 0, 0] },
+    table: { visible: $('c_table').checked, surface_z_U: boxU.center[2] - boxU.size[2] / 2, height_above_floor: boxU.center[2] - boxU.size[2] / 2 - placement.h + 0.779 },
     box_root_link: { center: reg.center, size_xyz: reg.dims.box, rpy_deg: reg.rpy },
     placement: { root_link_in_U: { position: [placement.d, placement.y0, placement.h], yaw_deg: 180 },
       user_pelvis_in_root_link: { position: [placement.d, placement.y0, -placement.h], yaw_deg: 180 },
@@ -361,16 +434,19 @@ $('dl').onclick = () => {
     }
   }
   const url = URL.createObjectURL(new Blob([JSON.stringify(out, null, 1)], { type: 'application/json' }));
+  window.lastDownload = out;
   Object.assign(document.createElement('a'), { href: url, download: `ergocub_region_${reg.type}.json` }).click();
+  setTimeout(() => URL.revokeObjectURL(url), 1000);
 };
 
 buildSliders(); refreshClouds();
-window.app = { goTo, fk, chains, reg, updateRegion, clouds, placement, user };
+window.app = { goTo, fk, chains, reg, updateRegion, clouds, placement, user, boxU, updatePlacement, bestPlacement };
 renderer.setAnimationLoop(() => renderer.render(scene, camera));
 
 // ---------- self-test / screenshot presets: index.html?test , ?region ----------
 const qs = new URLSearchParams(location.search);
 if (qs.has('collab')) { $('c_collab').checked = true; $('c_collab').onchange(); }
+if (qs.has('collab') && qs.has('best')) bestPlacement();
 if (qs.has('test') || qs.has('region') || qs.has('down') || qs.has('locked') || qs.has('ik')) {
   while (!robot) await new Promise(r => setTimeout(r, 100));
   if (qs.has('down')) { $('variant').value = 'down'; refreshClouds(); }

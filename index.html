@@ -60,6 +60,13 @@
   <small>Placement of root_link in user frame U (yaw 180°), metres.</small>
   <div id="placement"></div>
   <div id="pelvis_height"></div>
+  <small>Box in user frame U, metres.</small>
+  <div id="collab_box"></div>
+  <small>Their standing box: centre [0.35, -0.20, 0.55] m; size [0.30, 0.60, 0.40] m.</small>
+  <div class="row"><button id="standing_box">reset to standing box</button></div>
+  <div class="row"><input type="checkbox" id="c_table" checked>table (surface at box bottom)</div>
+  <div class="row"><button id="best_placement">best placement</button></div>
+  <div id="bestmsg" style="white-space:pre-line"></div>
   <small>No collision checking. Target = palm frame at the wrist; fingers ~10 cm further.</small>
 
   <h2>Region</h2>
@@ -74,6 +81,6 @@
   <small>Grid 2 cm; a point is reachable if the controller-chain IK (ergocub-cartesian-control, same joint limits)
     gets the palm within 1 cm. Drag to orbit, right-drag to pan, wheel to zoom.</small>
 </div>
-<script type="module" src="app.js?v=3"></script>
+<script type="module" src="app.js?v=4"></script>
 </body>
 </html>
