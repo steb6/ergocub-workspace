@@ -1,5 +1,5 @@
 import * as THREE from 'three';
-import { HUMAN, RAD, PRESETS, PAPER, ParticleFilter, bounds, humanFK, humanIK, observe, seededRandom } from './experiment-core.js?v=5';
+import { HUMAN, RAD, PRESETS, PAPER, ParticleFilter, bounds, humanFK, humanIK, observe, seededRandom } from './experiment-core.js?v=6';
 const $ = id => document.getElementById(id);
 const clone = x => JSON.parse(JSON.stringify(x));
 const ACTIVE_CANDIDATES = 8;
@@ -7,7 +7,7 @@ const ACTIVE_CANDIDATES = 8;
 export function createExperiment(api) {
   const panel = document.createElement('section'); panel.id = 'experiment';
   panel.innerHTML = `<h2>Handover experiment (paper pipeline)</h2>
-  <small>Simulated right upper limb (7 DOFs); estimates the impairment coefficients α of shoulder flexion Sy and elbow flexion Ey. Needs the collaborator setup.</small>
+  <small>Simulated right upper limb (7 DOFs) touching ergoCub's index fingertip with its own index; estimates the impairment coefficients α of shoulder flexion Sy and elbow flexion Ey. Needs the collaborator setup.</small>
   <fieldset id="exp-settings" style="border:0;padding:0;margin:6px 0">
     <div class="row"><label class="k">truth</label><select id="exp-preset"><option value="healthy">healthy</option><option value="shoulder">shoulder flexion impaired</option><option value="shoulderHalf">shoulder half impaired</option><option value="elbow">elbow flexion impaired</option><option value="elbowHalf">elbow half impaired</option><option value="custom">custom</option></select></div>
     <div class="row"><label class="k">α* Sy</label><input id="exp-s" type="range" min="0" max="1" step="0.05" value="0"><output id="exp-s-value">0.00</output></div>
@@ -24,14 +24,15 @@ export function createExperiment(api) {
   <div id="exp-result"></div><button id="exp-download" disabled>Download run JSON</button>
   <pre id="exp-summary" style="display:none"></pre>
   <details style="margin-top:6px"><summary>Model &amp; assumptions</summary><small>
-  As the paper: bounds of Eq. (2) with q<sub>m</sub>=q<sub>n</sub>, ζ=5°; human IK of Eq. (3) (γ=0.05, best effort if unreachable); particle filter with 50 particles (uniform init), σ<sub>q</sub>²=0.2 rad², resampling when N<sub>eff</sub>/N&lt;0.4 with jitter σ²=0.05 (clipped to [0,1]); stop when both variances &lt;0.003 for 3 handovers or after 25. Handover poses random in the box (restricted to points ergoCub reaches).<br>
-  Assumed (not in the paper): segment lengths 0.30/0.26/0.09 m, healthy limits, q<sub>n</sub> (upper arm horizontal, elbow 30°), position-only handover, numerical IK (penalty + bounded Gauss-Newton, 4 starts), tracking noise σ. The simulated user uses the same IK with the true α, as in the paper's simulation.<br>
+  As the paper: bounds of Eq. (2) with q<sub>m</sub>=q<sub>n</sub>, ζ=5°; human IK of Eq. (3) (γ=0.05, best effort if unreachable); particle filter with 50 particles (uniform init), σ<sub>q</sub>²=0.2 rad², resampling when N<sub>eff</sub>/N&lt;0.4 with jitter σ²=0.05 (clipped to [0,1]); stop when both variances &lt;0.003 for 3 handovers or after 25. Handover poses random in the box (restricted to points ergoCub's index fingertip reaches).<br>
+  Contact task (our adaptation): each handover is a fingertip touch, ergoCub index fingertip (pointing hand, 0.188 m beyond the palm frame) = user index fingertip, position only for the user. ergoCub's index is additionally steered to point against the user's finger (soft axis task in its IK, dropped if it costs fingertip accuracy); this affects only the robot's posture, not the filter.<br>
+  Assumed (not in the paper): segment lengths 0.30/0.26 m and wrist→index fingertip 0.18 m (palm 0.10 + extended index 0.08, rigid, along the hand axis), healthy limits, q<sub>n</sub> (upper arm horizontal, elbow 30°), position-only fingertip target, numerical IK (penalty + bounded Gauss-Newton, 4 starts), tracking noise σ. The simulated user uses the same IK with the true α, as in the paper's simulation.<br>
   Extension: "active" scores ${ACTIVE_CANDIDATES} random reachable poses by a Gaussian approximation of the expected information gain, ½ ln det(I + Cov<sub>pred</sub>/σ<sub>q</sub>²), and takes the best.</small></details>`;
   $('bestmsg').parentElement.insertBefore(panel, $('bestmsg').nextElementSibling.nextElementSibling);
   const markers = new THREE.Group(); api.user.add(markers);
   const jointMaterial = new THREE.MeshStandardMaterial({ color: 0x71d8b3 });
   const joints = Array.from({ length: 4 }, () => { const m = new THREE.Mesh(new THREE.SphereGeometry(.021, 12, 8), jointMaterial); api.user.add(m); m.visible = false; return m; });
-  const object = new THREE.Mesh(new THREE.BoxGeometry(.045, .045, .065), new THREE.MeshStandardMaterial({ color: 0xffcf66, metalness: .15, roughness: .4 }));
+  const object = new THREE.Mesh(new THREE.SphereGeometry(.012, 14, 10), new THREE.MeshStandardMaterial({ color: 0xffcf66, metalness: .15, roughness: .4 }));  // contact point (robot fingertip)
   object.visible = false; api.world.add(object);
   let token = 0, running = false, busy = false, timer = null, pool = null, pf = null, records = [], settings = null, rng = null, truth = null, fast = false;
   const REST = [0, 10 * RAD, 0, 20 * RAD, 0, 0, 0];
@@ -50,7 +51,7 @@ export function createExperiment(api) {
     $('exp-download').disabled = !records.length;
   }
   function drawHuman(q) {
-    const f = humanFK(q); api.drawHuman(f.points); humanQ = q.slice();
+    const f = humanFK(q); api.drawHuman(f.points, f.knuckle); humanQ = q.slice();
     f.points.forEach((p, i) => { joints[i].position.set(...p); joints[i].visible = api.enabled(); });
   }
   function clearMarkers() { for (const child of [...markers.children]) { markers.remove(child); child.geometry.dispose(); child.material.dispose(); } }
@@ -65,7 +66,7 @@ export function createExperiment(api) {
     return { preset: $('exp-preset').value, groundTruth: [num('exp-s', 0, 1, 0), num('exp-e', 0, 1, 0)], policy: $('exp-policy').value,
       activeCandidates: ACTIVE_CANDIDATES, trackingStd: num('exp-noise', 0, .5, .03), filter: { ...PAPER, maxHandovers: Math.round(num('exp-max', 1, 100, 25)) },
       seed: Math.round(num('exp-seed', 0, 999999, 2026)), box: clone(api.box()), placement: clone(api.placement()), torso: api.torso(), model: clone(HUMAN),
-      task: 'position only; handover point = ergoCub palm target = human hand tip' };
+      task: 'fingertip contact: ergoCub index fingertip = human index fingertip (position); ergoCub index points against the human finger when its IK allows (soft, else position only)' };
   }
   function init() {
     settings = settingsFromUI(); truth = settings.groundTruth.slice(); rng = seededRandom(settings.seed);
@@ -93,7 +94,7 @@ export function createExperiment(api) {
     return best;
   }
   function animate(plan, q, myToken) {
-    if (fast) { api.apply(plan, plan.q); object.position.set(...api.palmPosition(plan)); object.visible = true; drawHuman(q); return Promise.resolve(true); }
+    if (fast) { api.apply(plan, plan.q); object.position.set(...api.tipPosition(plan)); object.visible = true; drawHuman(q); return Promise.resolve(true); }
     const duration = 1600 / Number($('exp-speed').value), robotFrom = api.current(plan), humanFrom = humanQ.slice(), start = performance.now();
     const ease = t => { t = Math.max(0, Math.min(1, t)); return t * t * (3 - 2 * t); };
     return new Promise(resolve => {
@@ -102,7 +103,7 @@ export function createExperiment(api) {
         if (myToken !== token) { resolve(false); return; }
         const t = (now - start) / duration, a = ease(t * 2), b = ease(t * 2 - 1);  // robot first, then the human reaches
         api.apply(plan, robotFrom.map((v, i) => v + a * (plan.q[i] - v)));
-        object.position.set(...api.palmPosition(plan)); object.visible = true;
+        object.position.set(...api.tipPosition(plan)); object.visible = true;
         drawHuman(humanFrom.map((v, i) => v + b * (q[i] - v)));
         if (t < 1) setTimeout(frame, 16); else resolve(true);  // timers, not rAF: also advances in headless tests
       }
@@ -116,18 +117,19 @@ export function createExperiment(api) {
       if (!pf) init();
       const t0 = performance.now(), { c, predictions, score } = choose();
       const reached = humanIK(c.pose, truth);                         // simulated user: only the simulator sees α*
+      const plan = api.orient(c.plan, humanFK(reached.q).dir);        // ergoCub index against the user's index (visual only)
       const observation = observe(reached.q, settings.trackingStd, rng);
       const posterior = pf.update(predictions, observation), computationMs = performance.now() - t0;
       const index = records.length + 1, err = posterior.mean.reduce((s, v, k) => s + Math.abs(v - truth[k]), 0) / 2;
-      records.push({ index, pose_U: c.pose, robot: { side: c.plan.side, q: c.plan.q, positionError: c.plan.err, palm_root: c.root }, infoScore: score,
+      records.push({ index, pose_U: c.pose, robot: { side: plan.side, q: plan.q, positionError: plan.err, fingertip_root: c.root, pointing: plan.pointing, pointingErrorDeg: plan.dang / RAD }, infoScore: score,
         simulatedQ: reached.q, humanPositionError: reached.error, observation: { joints: ['Sy', 'Ey'], rad: observation },
         predictions,
         posterior: clone(posterior), particles: clone(pf.particles), weights: pf.weights.slice(), meanAbsoluteError: err, computationMs });
       const m = new THREE.Mesh(new THREE.SphereGeometry(.011, 10, 8), new THREE.MeshBasicMaterial({ color: new THREE.Color().setHSL(.66 * (1 - (index - 1) / Math.max(1, settings.filter.maxHandovers - 1)), .9, .55) }));
       m.position.set(...c.pose); markers.add(m);
-      if (!await animate(c.plan, reached.q, myToken)) return;
-      $('exp-status').textContent = `Handover ${index}/${settings.filter.maxHandovers} · ergoCub ${c.plan.side === 'l' ? 'left' : 'right'} arm · ${settings.policy}\n` +
-        `α̂ = [${posterior.mean.map(v => v.toFixed(2))}] · MAE ${err.toFixed(3)} · user miss ${(reached.error * 100).toFixed(1)} cm\n` +
+      if (!await animate(plan, reached.q, myToken)) return;
+      $('exp-status').textContent = `Handover ${index}/${settings.filter.maxHandovers} · ergoCub ${plan.side === 'l' ? 'left' : 'right'} index${plan.pointing ? ` (anti-parallel ${(plan.dang / RAD).toFixed(0)}°)` : ' (position only)'} · ${settings.policy}\n` +
+        `α̂ = [${posterior.mean.map(v => v.toFixed(2))}] · MAE ${err.toFixed(3)} · fingertip miss ${(reached.error * 100).toFixed(1)} cm\n` +
         `compute ${computationMs.toFixed(0)} ms · resamplings ${pf.resamplings} · ${pf.done ? `stopped: ${pf.reason}` : `variance streak ${pf.stable}/3`}`;
       plot(); renderResult();
       if (pf.done) running = false;
@@ -172,7 +174,8 @@ export function createExperiment(api) {
     $('exp-result').innerHTML = `<small>${pf.done ? `Final estimate after ${pf.count} handovers (${pf.reason})` : 'Current estimate'}; fROM in degrees</small>
       <table style="width:100%;font-size:11px"><thead><tr><th>DOF</th><th>α̂ ± σ</th><th>α*</th><th>fROM est.</th><th>fROM true</th></tr></thead><tbody>${[1, 3].map((j, k) =>
       `<tr><td>${HUMAN.names[j]}</td><td>${state.mean[k].toFixed(2)} ± ${state.std[k].toFixed(2)}</td><td>${truth[k].toFixed(2)}</td><td>[${deg(estimate.lower[j])}, ${deg(estimate.upper[j])}]</td><td>[${deg(actual.lower[j])}, ${deg(actual.upper[j])}]</td></tr>`).join('')}</tbody></table>`;
-    if (pf.done) $('exp-summary').textContent = JSON.stringify({ preset: settings.preset, policy: settings.policy, truth, estimate: state.mean, std: state.std, n: pf.count, resamplings: pf.resamplings, reason: pf.reason, maxComputeMs: Math.max(...records.map(r => r.computationMs)) });
+    if (pf.done) $('exp-summary').textContent = JSON.stringify({ preset: settings.preset, policy: settings.policy, truth, estimate: state.mean, std: state.std, n: pf.count, resamplings: pf.resamplings, reason: pf.reason, maxComputeMs: Math.max(...records.map(r => r.computationMs)),
+      robotPointing: records.filter(r => r.robot.pointing).length, robotPointingErrorDeg: (a => ({ median: a[a.length >> 1], max: a[a.length - 1] }))(records.map(r => r.robot.pointingErrorDeg).sort((x, y) => x - y)), userFingertipMissMaxCm: 100 * Math.max(...records.map(r => r.humanPositionError)) });
   }
   function exportRun() {
     const final = pf ? pf.summary() : null;

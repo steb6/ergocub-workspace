@@ -33,14 +33,15 @@
 <div id="panel">
   <h1>ergoCub reachable workspace</h1>
   <small>Fixed root (pelvis does not move); torso joints free within their limits, or locked at 0. Frame <b>root_link</b> (x forward, y left, z up), metres.
-  Target = origin of <code>l/r_hand_palm</code> (the ergocub-cartesian-control end-effector).</small>
+  Target = <b>index fingertip</b> of the pointing hand (index extended, other fingers and thumb closed), 0.188 m beyond the
+  <code>l/r_hand_palm</code> origin used by ergocub-cartesian-control (palm tool kept in <code>chains.json</code> as <code>tool_palm</code>).</small>
 
   <h2>Reachable points</h2>
   <div class="row"><label class="k">torso</label>
     <select id="torso"><option value="free">torso joints used (roll, pitch, yaw)</option><option value="locked">torso locked at 0</option></select></div>
   <div class="row"><label class="k">variant</label>
     <select id="variant"><option value="free">position only (orientation free)</option>
-    <option value="down">palm down, fingers forward (±10°)</option></select></div>
+    <option value="down">palm down, index pointing forward (±10°)</option></select></div>
   <div class="row"><input type="checkbox" id="c_left" checked><span class="sw" style="background:#4a90ff"></span>left <span id="n_left"></span></div>
   <div class="row"><input type="checkbox" id="c_right" checked><span class="sw" style="background:#ff9f40"></span>right <span id="n_right"></span></div>
   <div class="row"><input type="checkbox" id="c_both"><span class="sw" style="background:#3ddc84"></span>both (intersection) <span id="n_both"></span></div>
@@ -67,7 +68,7 @@
   <div class="row"><input type="checkbox" id="c_table" checked>table (surface at box bottom)</div>
   <div class="row"><button id="best_placement">best placement</button></div>
   <div id="bestmsg" style="white-space:pre-line"></div>
-  <small>No collision checking. Target = palm frame at the wrist; fingers ~10 cm further.</small>
+  <small>No collision checking. Contact task: ergoCub index fingertip = user index fingertip.</small>
 
   <h2>Region</h2>
   <div class="row"><input type="checkbox" id="c_region">show region
@@ -79,8 +80,8 @@
   <div class="row"><input type="checkbox" id="c_dlpts">include points inside</div>
   <div class="row"><button id="dl">Download region JSON</button></div>
   <small>Grid 2 cm; a point is reachable if the controller-chain IK (ergocub-cartesian-control, same joint limits)
-    gets the palm within 1 cm. Drag to orbit, right-drag to pan, wheel to zoom.</small>
+    gets the index fingertip within 1 cm. Drag to orbit, right-drag to pan, wheel to zoom.</small>
 </div>
-<script type="module" src="app.js?v=5"></script>
+<script type="module" src="app.js?v=6"></script>
 </body>
 </html>

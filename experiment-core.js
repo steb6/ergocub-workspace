@@ -3,7 +3,8 @@
 export const RAD = Math.PI / 180;
 export const HUMAN = {
   names: ['Sx', 'Sy', 'Sz', 'Ey', 'Ez', 'Wx', 'Wy'],
-  shoulder: [0, -0.216, 0.42], lengths: [0.30, 0.26, 0.09],
+  shoulder: [0, -0.216, 0.42], lengths: [0.30, 0.26, 0.18], palm: 0.10,
+  // lengths[2] = wrist -> index fingertip with the index extended (pointing hand): palm 0.10 + finger 0.08.
   // Numerical anthropometry and reference posture are assumptions, not values
   // reported in the paper. Rotations are intrinsic X,-Y,Z,-Y,Z,X,-Y.
   lower: [-45, -40, -90, 0, -90, -80, -30].map(v => v * RAD),
@@ -43,8 +44,9 @@ export function humanFK(q, model = HUMAN, jacobian = false) {
     const length = i === 2 ? model.lengths[0] : i === 4 ? model.lengths[1] : i === 6 ? model.lengths[2] : 0;
     if (length) { const d = mv(R, [0,0,-length]); p = p.map((v,k) => v+d[k]); points.push(p.slice()); }
   }
+  const dir = mv(R, [0,0,-1]), knuckle = points[2].map((v,k) => v + model.palm*dir[k]);  // finger points along the hand axis
   const J = jacobian ? directions.map((a,i) => { const d = p.map((v,k) => v-origins[i][k]); return [a[1]*d[2]-a[2]*d[1],a[2]*d[0]-a[0]*d[2],a[0]*d[1]-a[1]*d[0]]; }) : null;
-  return { p, points, R, J };
+  return { p, points, R, J, dir, knuckle };
 }
 function solve(A,b) {
   const n=b.length, M=A.map((r,i)=>[...r,b[i]]);
@@ -57,7 +59,7 @@ function solve(A,b) {
 }
 // Eq. (3) approximated by bounded, damped Gauss–Newton with a stiff task
 // penalty. It returns a best-effort posture even for unreachable positions.
-// The task is position-only; orientation of the object is not prescribed.
+// The task is position-only: the index fingertip at the contact point; finger direction is not prescribed.
 export function humanIK(target, alpha, model = HUMAN) {
   const lim=bounds(alpha,model), a=[0,alpha[0],0,alpha[1],0,0,0];
   const w=a.map(v=>v*v+model.gamma*(1-v)*(1-v));

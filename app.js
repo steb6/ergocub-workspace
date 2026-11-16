@@ -1,5 +1,5 @@
-import { createExperiment } from './experiment.js?v=5';
-import { createPlacementSearch } from './placement.js?v=5';
+import { createExperiment } from './experiment.js?v=6';
+import { createPlacementSearch } from './placement.js?v=6';
 import * as THREE from 'three';
 import { OrbitControls } from 'three/examples/jsm/controls/OrbitControls.js';
 import { TransformControls } from 'three/examples/jsm/controls/TransformControls.js';
@@ -36,15 +36,17 @@ new URDFLoader().load('ergocub.urdf', r => {
   robot = r; world.add(r);
   const mat = new THREE.MeshStandardMaterial({ color: 0xc8ccd2, metalness: 0.1, roughness: 0.6 });
   r.traverse(o => { if (o.isMesh) o.material = mat; });
+  for (const [n, v] of Object.entries(window.handPose || {})) r.setJointValue(n, v);  // pointing hand (index extended)
   $('loading').remove();
   window.robot = r;
 });
 $('c_robot').onchange = e => { if (robot) robot.visible = e.target.checked; };
 
 // ---------- arm chains (same as offline: ergocub-cartesian-control chain + control-board limits) ----------
-const chains = await (await fetch('data/chains.json?v=5')).json();
-const meta = await (await fetch('data/meta.json?v=5')).json();
-const qcur = {}; for (const k in chains) qcur[k] = new Array(chains[k].joints.length).fill(0);
+const chains = await (await fetch('data/chains.json?v=6')).json();
+const meta = await (await fetch('data/meta.json?v=6')).json();
+window.handPose = chains.hand.pose; if (robot) for (const [n, v] of Object.entries(chains.hand.pose)) robot.setJointValue(n, v);
+const qcur = {}; for (const k in chains) if (chains[k].joints) qcur[k] = new Array(chains[k].joints.length).fill(0);
 const tk = () => $('torso').value === 'free' ? 't' : '';  // chain/cloud prefix: '' torso locked, 't' torso free
 const vkey = () => tk() + $('variant').value;
 const R_DOWN = { l: [[0, 0, -1], [-1, 0, 0], [0, 1, 0]], r: [[0, 0, -1], [1, 0, 0], [0, -1, 0]] };
@@ -87,9 +89,12 @@ const rotErr = (Rd, R) => { const E = mm(Rd, T3(R)); return [0.5 * (E[2][1] - E[
 const rotAngle = (Rd, R) => { const E = mm(Rd, T3(R)); return Math.acos(Math.min(1, Math.max(-1, (E[0][0] + E[1][1] + E[2][2] - 1) / 2))); };
 
 // damped least squares + joint-limit clamping, several seeds (same scheme as the offline grid)
+// options.dir: desired index pointing direction (root frame, unit); soft axis-alignment task, rotation about the finger free.
+const fingerAxis = (ch, R) => mv(R, ch.finger_dir);
+const dirAngle = (ch, R, d) => Math.acos(Math.min(1, Math.max(-1, fingerAxis(ch, R).reduce((s, v, k) => s + v * d[k], 0))));
 function ik(side, target, Rd, options = {}) {
-  const key = tk() + side, ch = chains[key], lo = ch.qmin, hi = ch.qmax, wr = 0.3;
-  const seeds = [qcur[key].slice(), lo.map(() => 0), lo.map((l, i) => (l + hi[i]) / 2)];
+  const key = tk() + side, ch = chains[key], lo = ch.qmin, hi = ch.qmax, wr = 0.3, dd = options.dir, wd = 0.3;
+  const seeds = [...(options.seeds || []), qcur[key].slice(), lo.map(() => 0), lo.map((l, i) => (l + hi[i]) / 2)];
   for (let k = 0; k < (options.randomSeeds ?? 25); k++) seeds.push(lo.map((l, i) => l + Math.random() * (hi[i] - l)));
   let best = null;
   for (const s of seeds) {
@@ -97,18 +102,23 @@ function ik(side, target, Rd, options = {}) {
     for (let it = 0; it < (options.iterations ?? 200); it++) {
       const { p, R, J } = fk(ch, q);
       let e = target.map((v, k) => v - p[k]), Jt = J.slice(0, 3);
-      if (Math.hypot(...e) < 0.001 && (!Rd || rotAngle(Rd, R) < 3 * DEG)) break;
+      if (Math.hypot(...e) < 0.001 && (!Rd || rotAngle(Rd, R) < 3 * DEG) && (!dd || dirAngle(ch, R, dd) < 3 * DEG)) break;
       if (Rd) { e = e.concat(rotErr(Rd, R).map(v => wr * v)); Jt = Jt.concat(J.slice(3).map(r => r.map(v => wr * v))); }
+      else if (dd) {  // a x a_des = rotation that aligns the finger; project the angular Jacobian orthogonally to a
+        const a = fingerAxis(ch, R), P = [0, 1, 2].map(i => [0, 1, 2].map(j => (i === j ? 1 : 0) - a[i] * a[j]));
+        const Jw = J.slice(3), Jp = P.map(r => Jw[0].map((_, c) => r.reduce((s2, v, k) => s2 + v * Jw[k][c], 0)));
+        e = e.concat(cross(a, dd).map(v => wd * v)); Jt = Jt.concat(Jp.map(r => r.map(v => wd * v)));
+      }
       const A = Jt.map(r => Jt.map(r2 => r.reduce((s2, v, k) => s2 + v * r2[k], 0)));
       A.forEach((r, i) => r[i] += 0.02 * 0.02);
       const y = solve(A, e);
       q = q.map((v, i) => { const d = Math.max(-0.2, Math.min(0.2, Jt.reduce((s2, r, k) => s2 + r[i] * y[k], 0))); return Math.min(hi[i], Math.max(lo[i], v + d)); });
     }
     const { p, R } = fk(ch, q);
-    const err = Math.hypot(...target.map((v, k) => v - p[k])), ang = Rd ? rotAngle(Rd, R) : 0;
-    const score = err + (Rd && ang > 10 * DEG ? 1 : 0);
-    if (!best || score < best.score) best = { q, err, ang, score };
-    if (err < 0.002 && (!Rd || ang < 5 * DEG)) break;
+    const err = Math.hypot(...target.map((v, k) => v - p[k])), ang = Rd ? rotAngle(Rd, R) : 0, dang = dd ? dirAngle(ch, R, dd) : 0;
+    const score = err + (Rd && ang > 10 * DEG ? 1 : 0) + (dd ? 0.02 * dang : 0);  // position first, then pointing
+    if (!best || score < best.score) best = { q, err, ang, dang, score };
+    if (err < 0.002 && (!Rd || ang < 5 * DEG) && (!dd || dang < 10 * DEG)) break;
   }
   return best;
 }
@@ -144,7 +154,7 @@ const pmat = name => new THREE.PointsMaterial({ size: 0.008, vertexColors: true,
 for (const v of ['free', 'down', 'tfree', 'tdown']) {
   clouds[v] = {};
   for (const n of ['left', 'right', 'both']) {
-    const buf = await (await fetch(`data/${v}_${n}.bin?v=5`)).arrayBuffer();
+    const buf = await (await fetch(`data/${v}_${n}.bin?v=6`)).arrayBuffer();
     const idx = new Int16Array(buf), pos = new Float32Array(idx.length);
     for (let i = 0; i < idx.length; i++) pos[i] = idx[i] * meta.step;
     const g = new THREE.BufferGeometry();
@@ -273,6 +283,7 @@ for (const y of [-0.12, 0.12]) {
 const rightUpper = limb([0, -0.216, 0.42], [0.25, -0.22, 0.30], 0.043);
 const rightForearm = limb([0.25, -0.22, 0.30], [0.45, -0.20, 0.29], 0.035);
 const rightHand = bodyPart([0.11, 0.075, 0.035], [0.45, -0.20, 0.29]);
+const rightIndex = limb([0.50, -0.20, 0.29], [0.58, -0.20, 0.29], 0.009); rightIndex.visible = false;  // shown during the experiment
 const tableMat = new THREE.MeshStandardMaterial({ color: 0x90969d, transparent: true, opacity: 0.35, depthWrite: false });
 const tableTop = bodyPart([1, 1, 1], [0, 0, 0], tableMat);
 const tableLegs = Array.from({ length: 4 }, () => bodyPart([1, 1, 1], [0, 0, 0], tableMat));
@@ -305,6 +316,7 @@ function updatePlacement() {
   const elbow = [hand[0] * 0.52, -0.216 + (hand[1] + 0.216) * 0.5, (0.42 + hand[2]) / 2 + 0.025];
   placeLimb(rightUpper, [0, -0.216, 0.42], elbow);
   placeLimb(rightForearm, elbow, hand); rightHand.position.set(...hand);
+  rightHand.quaternion.identity(); rightHand.scale.x = 1; rightIndex.visible = false;
   if ($('c_collab').checked) {
     reg.center = [d - boxU.center[0], y0 - boxU.center[1], boxU.center[2] - h].map(v => +v.toFixed(6));
     reg.dims.box = boxU.size.slice(); reg.rpy = [0, 0, 0]; syncSliders();
@@ -412,10 +424,10 @@ $('dl').onclick = () => {
     type: reg.type, frame: 'root_link', units: 'm', center: reg.center,
     dims: reg.type === 'box' ? { size_xyz: reg.dims.box } : reg.type === 'sphere' ? { radius: reg.dims.sphere[0] } : { semi_axes_abc: reg.dims.ellipsoid },
     orientation: { rpy_deg: reg.rpy, rpy_convention: 'URDF (R = Rz(yaw) Ry(pitch) Rx(roll)), fixed axes of root_link', quaternion_xyzw: [q.x, q.y, q.z, q.w] },
-    reachability_variant: (v.endsWith('free') ? 'position only, orientation free' : 'palm down, fingers forward (±10 deg)') +
+    reachability_variant: (v.endsWith('free') ? 'position only, orientation free' : 'palm down, index pointing forward (±10 deg)') +
       (v[0] === 't' ? '; torso joints used (roll ±23, pitch -18..45, yaw ±43 deg)' : '; torso locked at 0'),
     reachable_counts: window.regionCounts,
-    notes: 'ergoCub, fixed root (root_link); end-effector = l/r_hand_palm origin; grid 2 cm; reachable if IK position error < 1 cm',
+    notes: 'ergoCub, fixed root (root_link); end-effector = index fingertip of the pointing hand (0.188 m from the l/r_hand_palm origin); grid 2 cm; reachable if IK position error < 1 cm',
   };
   if ($('c_collab').checked) out.collaborator = {
     frame_U: { origin: 'seated user pelvis', axes: { x: 'user gaze', y: 'user left', z: 'up' }, units: 'm' },
@@ -426,7 +438,7 @@ $('dl').onclick = () => {
       user_pelvis_in_root_link: { position: [placement.d, placement.y0, -placement.h], yaw_deg: 180 },
       pelvis_height_above_floor: 0.779 - placement.h, floor_z_root_link: -0.779 },
     coverage: window.regionCoverage,
-    notes: 'No collision checking; target = palm frame at wrist, fingers approximately 10 cm further',
+    notes: 'No collision checking; target = ergoCub index fingertip (pointing hand) = human index fingertip (contact)',
   };
   if ($('c_dlpts').checked) {
     out.reachable_points = {};
@@ -451,12 +463,13 @@ renderer.setAnimationLoop(() => renderer.render(scene, camera));
 const experiment = createExperiment({
   user, world, enabled: () => $('c_collab').checked,
   box: () => boxU, placement: () => placement, torso: () => $('torso').value,
-  drawHuman(points) {
+  drawHuman(points, knuckle) {
     placeLimb(rightUpper, points[0], points[1]);
     placeLimb(rightForearm, points[1], points[2]);
-    rightHand.position.set(...points[2].map((v,k) => (v+points[3][k])/2));
-    // Existing hand geometry has its long direction on x; orient it along wrist–tip.
-    rightHand.quaternion.setFromUnitVectors(new THREE.Vector3(1,0,0), new THREE.Vector3(...points[3]).sub(new THREE.Vector3(...points[2])).normalize());
+    rightHand.position.set(...points[2].map((v,k) => (v+knuckle[k])/2));
+    // Hand box has its long direction on x; orient it along wrist–knuckle, then the extended index knuckle–tip.
+    rightHand.quaternion.setFromUnitVectors(new THREE.Vector3(1,0,0), new THREE.Vector3(...knuckle).sub(new THREE.Vector3(...points[2])).normalize());
+    rightHand.scale.x = 0.10 / 0.11; rightIndex.visible = true; placeLimb(rightIndex, knuckle, points[3]);
   },
   // All reachable cloud points (current torso mode, position-only) inside the box, in U and root frames.
   candidatePool() {
@@ -483,10 +496,20 @@ const experiment = createExperiment({
     }
     return null;
   },
+  // Re-plan the chosen arm so the index points against the human finger (dirU: human finger direction in U).
+  // Keeps the position-only plan if the pointing solution misses the fingertip by >= 1 cm.
+  orient(plan, dirU) {
+    const d=[-dirU[0],-dirU[1],dirU[2]].map(v=>-v);  // U -> root_link (yaw 180°), then opposite direction
+    const ch=chains[plan.key], a=ik(plan.side,plan.target,null,{dir:d,seeds:[plan.q],randomSeeds:6,iterations:200});
+    // position has priority: polish the pointing solution with position-only iterations, keep whichever is better aligned
+    const b=ik(plan.side,plan.target,null,{seeds:[a.q],randomSeeds:0,iterations:80});
+    b.dang=dirAngle(ch,fk(ch,b.q).R,d); const p0=dirAngle(ch,fk(ch,plan.q).R,d);
+    return b.err<0.01 && b.dang<p0 ? {...plan,...b,pointing:true,dirDes:d} : {...plan,pointing:false,dirDes:d,dang:p0};
+  },
   resetHuman: () => updatePlacement(),
   current: plan => qcur[plan.key].slice(),
   apply: (plan,q) => setArm(plan.key,q),
-  palmPosition: plan => fk(chains[plan.key],qcur[plan.key]).p,
+  tipPosition: plan => fk(chains[plan.key],qcur[plan.key]).p,
 });
 window.experiment = experiment;
 
@@ -509,7 +532,7 @@ if (qs.has('test') || qs.has('region') || qs.has('down') || qs.has('locked') || 
   const out = [];
   for (const [side, t] of [['l', [0.25, 0.25, 0.35]], ['r', [0.2, -0.3, 0.2]], ['l', [0.9, 0.0, 0.3]]]) {
     $('arm').value = side; goTo(t);
-    const w = new THREE.Vector3(); robot.links[side + '_hand_palm'].getWorldPosition(w); world.worldToLocal(w);
+    const w = new THREE.Vector3(...chains.hand.tip_in_index_3); robot.links[side + '_hand_index_3'].localToWorld(w); world.worldToLocal(w);
     const p = fk(chains[tk() + side], window.lastIK.q).p;
     out.push(`${side} target ${t} ik_err ${window.lastIK.err.toFixed(4)} urdf-vs-fk ${Math.hypot(w.x - p[0], w.y - p[1], w.z - p[2]).toExponential(2)}`);
   }
