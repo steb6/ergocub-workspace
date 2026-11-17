@@ -33,15 +33,18 @@
 <div id="panel">
   <h1>ergoCub reachable workspace</h1>
   <small>Fixed root (pelvis does not move); torso joints free within their limits, or locked at 0. Frame <b>root_link</b> (x forward, y left, z up), metres.
-  Target = <b>index fingertip</b> of the pointing hand (index extended, other fingers and thumb closed), 0.188 m beyond the
-  <code>l/r_hand_palm</code> origin used by ergocub-cartesian-control (palm tool kept in <code>chains.json</code> as <code>tool_palm</code>).</small>
+  ergoCub holds a <b>mug</b>: two cylinders Ø5.5×17 cm, axes 13.5 cm apart, joined by a bar (box 5.5×17×19 cm); power grasp of cylinder A
+  (axis through the fist, centre (0, ±0.030, −0.095) m in <code>l/r_hand_palm</code>, thumb side up). Target = <b>mug frame</b> on the handle
+  (cylinder B): origin at its centre, <b>z</b> = A→B (blue), <b>y</b> = cylinder axis, x = y×z; 0.23 m from the palm origin.
+  Palm and fingertip tools stay in <code>chains.json</code>.</small>
 
   <h2>Reachable points</h2>
   <div class="row"><label class="k">torso</label>
     <select id="torso"><option value="free">torso joints used (roll, pitch, yaw)</option><option value="locked">torso locked at 0</option></select></div>
   <div class="row"><label class="k">variant</label>
-    <select id="variant"><option value="free">position only (orientation free)</option>
-    <option value="down">palm down, index pointing forward (±10°)</option></select></div>
+    <select id="variant"><option value="cone">(b) pose: handle z within 45° of the user's head</option>
+    <option value="free">(a) position only (orientation free)</option></select></div>
+  <small>(b) uses the user's head at the current placement (collaborator setup, also when hidden); cylinders orthogonal to z, as vertical as possible.</small>
   <div class="row"><input type="checkbox" id="c_left" checked><span class="sw" style="background:#4a90ff"></span>left <span id="n_left"></span></div>
   <div class="row"><input type="checkbox" id="c_right" checked><span class="sw" style="background:#ff9f40"></span>right <span id="n_right"></span></div>
   <div class="row"><input type="checkbox" id="c_both"><span class="sw" style="background:#3ddc84"></span>both (intersection) <span id="n_both"></span></div>
@@ -50,7 +53,7 @@
 
   <h2>Move an arm (in-browser IK)</h2>
   <div class="row"><label class="k">arm</label><select id="arm"><option value="l">left</option><option value="r">right</option></select>
-    <select id="ikori"><option value="free">orientation free</option><option value="down">palm down</option></select></div>
+    <select id="ikori"><option value="free">orientation free</option><option value="mug">handle towards head</option></select></div>
   <div class="row"><label class="k">target</label>
     <input type="number" id="tx" step="0.01" value="0.25"><input type="number" id="ty" step="0.01" value="0.25"><input type="number" id="tz" step="0.01" value="0.35"></div>
   <div class="row"><button id="go">Go</button><button id="home">Home</button><small>or Shift+click on a point</small></div>
@@ -68,7 +71,7 @@
   <div class="row"><input type="checkbox" id="c_table" checked>table (surface at box bottom)</div>
   <div class="row"><button id="best_placement">best placement</button></div>
   <div id="bestmsg" style="white-space:pre-line"></div>
-  <small>No collision checking. Contact task: ergoCub index fingertip = user index fingertip.</small>
+  <small>No collision checking. Handover task: user grip frame (right hand) = mug frame; best placement uses the selected variant.</small>
 
   <h2>Region</h2>
   <div class="row"><input type="checkbox" id="c_region">show region
@@ -80,8 +83,8 @@
   <div class="row"><input type="checkbox" id="c_dlpts">include points inside</div>
   <div class="row"><button id="dl">Download region JSON</button></div>
   <small>Grid 2 cm; a point is reachable if the controller-chain IK (ergocub-cartesian-control, same joint limits)
-    gets the index fingertip within 1 cm. Drag to orbit, right-drag to pan, wheel to zoom.</small>
+    gets the mug frame within 1 cm (and, for (b), within 2° of the mug rotation for one of 136 handle directions, 15° apart, inside the 45° cone). Drag to orbit, right-drag to pan, wheel to zoom.</small>
 </div>
-<script type="module" src="app.js?v=6"></script>
+<script type="module" src="app.js?v=7"></script>
 </body>
 </html>

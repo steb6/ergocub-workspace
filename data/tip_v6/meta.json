@@ -1,0 +1,22 @@
+{
+ "frame": "root_link",
+ "units": "m",
+ "step": 0.02,
+ "tol_pos": 0.01,
+ "tol_rot_deg": 10,
+ "torso": "free*/down*: locked at 0; tfree*/tdown*: torso_roll/pitch/yaw free within control-board limits",
+ "model": "ergoCubGazeboV1_1",
+ "ee": "index fingertip, pointing hand (kin.POINT_POSE), tool rotation = palm frame; down* = palm down, index pointing forward (+x)",
+ "free_left": 58098,
+ "free_right": 58075,
+ "free_both": 17070,
+ "down_left": 2937,
+ "down_right": 2937,
+ "down_both": 15,
+ "tfree_left": 197353,
+ "tfree_right": 197523,
+ "tfree_both": 135461,
+ "tdown_left": 29545,
+ "tdown_right": 29528,
+ "tdown_both": 10646
+}

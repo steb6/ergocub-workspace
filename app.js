@@ -1,5 +1,7 @@
-import { createExperiment } from './experiment.js?v=6';
-import { createPlacementSearch } from './placement.js?v=6';
+import { fk, robotIK } from './robot-core.js?v=7';
+import { rotationFromZ, rows as rows3, headRoot, toHead, feasibleDirs, CONE_DEG } from './mug.js?v=7';
+import { createExperiment } from './experiment.js?v=7';
+import { createPlacementSearch, createConePlacementSearch } from './placement.js?v=7';
 import * as THREE from 'three';
 import { OrbitControls } from 'three/examples/jsm/controls/OrbitControls.js';
 import { TransformControls } from 'three/examples/jsm/controls/TransformControls.js';
@@ -31,96 +33,42 @@ function resize() {
 window.addEventListener('resize', resize); resize();
 
 // ---------- robot ----------
-let robot = null;
+let robot = null, mugs = null;
+const attachMugs = () => { if (robot && mugs) for (const s of 'lr') robot.links[s + '_hand_palm'].add(mugs[s]); };
 new URDFLoader().load('ergocub.urdf', r => {
   robot = r; world.add(r);
   const mat = new THREE.MeshStandardMaterial({ color: 0xc8ccd2, metalness: 0.1, roughness: 0.6 });
   r.traverse(o => { if (o.isMesh) o.material = mat; });
-  for (const [n, v] of Object.entries(window.handPose || {})) r.setJointValue(n, v);  // pointing hand (index extended)
+  for (const [n, v] of Object.entries(window.handPose || {})) r.setJointValue(n, v);  // closed power grasp
+  attachMugs();
   $('loading').remove();
   window.robot = r;
 });
 $('c_robot').onchange = e => { if (robot) robot.visible = e.target.checked; };
 
 // ---------- arm chains (same as offline: ergocub-cartesian-control chain + control-board limits) ----------
-const chains = await (await fetch('data/chains.json?v=6')).json();
-const meta = await (await fetch('data/meta.json?v=6')).json();
+const chains = await (await fetch('data/chains.json?v=7')).json();
+const meta = await (await fetch('data/meta.json?v=7')).json();
+const MUG_DIRS = meta.mug_dirs, W = meta.mask_words, OBJ = chains.object;
 window.handPose = chains.hand.pose; if (robot) for (const [n, v] of Object.entries(chains.hand.pose)) robot.setJointValue(n, v);
+// ---------- the held object: cylinders A (in ergoCub's fist) and B (handle, mug frame) + bar near the top ----------
+const mugMat = new THREE.MeshStandardMaterial({ color: 0xffcf66, metalness: 0.1, roughness: 0.5 });
+function makeMug(side) {
+  const g = new THREE.Group(), r = OBJ.diameter / 2, H = OBJ.height, L = OBJ.axis_separation;
+  const T = chains[side].palm_to_mug; g.matrixAutoUpdate = false;
+  g.matrix.set(...T[0], ...T[1], ...T[2], ...T[3]);           // palm -> mug frame (cylinder B centre)
+  for (const z of [0, -L]) { const c = new THREE.Mesh(new THREE.CylinderGeometry(r, r, H, 24), mugMat); c.position.z = z; g.add(c); }  // cylinder axis = y
+  const bar = new THREE.Mesh(new THREE.BoxGeometry(0.02, 0.02, L), mugMat); bar.position.set(0, OBJ.bar_height, -L / 2); g.add(bar);
+  g.add(new THREE.AxesHelper(0.12)); g.visible = false; return g;
+}
+mugs = { l: makeMug('l'), r: makeMug('r') }; attachMugs();
+const showMug = side => { for (const s of 'lr') mugs[s].visible = s === side; };
 const qcur = {}; for (const k in chains) if (chains[k].joints) qcur[k] = new Array(chains[k].joints.length).fill(0);
 const tk = () => $('torso').value === 'free' ? 't' : '';  // chain/cloud prefix: '' torso locked, 't' torso free
 const vkey = () => tk() + $('variant').value;
-const R_DOWN = { l: [[0, 0, -1], [-1, 0, 0], [0, 1, 0]], r: [[0, 0, -1], [1, 0, 0], [0, -1, 0]] };
 
-const mm = (A, B) => A.map(r => B[0].map((_, j) => r.reduce((s, v, k) => s + v * B[k][j], 0)));
-const mv = (A, v) => A.map(r => r.reduce((s, x, k) => s + x * v[k], 0));
-const T3 = A => A[0].map((_, j) => A.map(r => r[j]));
-const cross = (a, b) => [a[1] * b[2] - a[2] * b[1], a[2] * b[0] - a[0] * b[2], a[0] * b[1] - a[1] * b[0]];
-function rodrigues(a, q) {
-  const c = Math.cos(q), s = Math.sin(q), t = 1 - c, [x, y, z] = a;
-  return [[t * x * x + c, t * x * y - s * z, t * x * z + s * y], [t * x * y + s * z, t * y * y + c, t * y * z - s * x], [t * x * z - s * y, t * y * z + s * x, t * z * z + c]];
-}
-function fk(ch, q) {
-  let R = [[1, 0, 0], [0, 1, 0], [0, 0, 1]], p = [0, 0, 0]; const zs = [], ps = [];
-  for (let i = 0; i < ch.T.length; i++) {
-    const T = ch.T[i];
-    p = p.map((v, k) => v + mv(R, [T[0][3], T[1][3], T[2][3]])[k]);
-    R = mm(R, T.slice(0, 3).map(r => r.slice(0, 3)));
-    zs.push(mv(R, ch.axis[i])); ps.push(p.slice());
-    R = mm(R, rodrigues(ch.axis[i], q[i]));
-  }
-  const tl = ch.tool; p = p.map((v, k) => v + mv(R, [tl[0][3], tl[1][3], tl[2][3]])[k]);
-  R = mm(R, tl.slice(0, 3).map(r => r.slice(0, 3)));
-  const J = [[], [], [], [], [], []];
-  for (let i = 0; i < ch.T.length; i++) { const c = cross(zs[i], p.map((v, k) => v - ps[i][k])); for (let k = 0; k < 3; k++) { J[k][i] = c[k]; J[k + 3][i] = zs[i][k]; } }
-  return { p, R, J };
-}
-function solve(A, b) { // Gaussian elimination with partial pivoting
-  const n = b.length, M = A.map((r, i) => [...r, b[i]]);
-  for (let c = 0; c < n; c++) {
-    let m = c; for (let r = c + 1; r < n; r++) if (Math.abs(M[r][c]) > Math.abs(M[m][c])) m = r;
-    [M[c], M[m]] = [M[m], M[c]];
-    for (let r = c + 1; r < n; r++) { const f = M[r][c] / M[c][c]; for (let k = c; k <= n; k++) M[r][k] -= f * M[c][k]; }
-  }
-  const x = new Array(n).fill(0);
-  for (let r = n - 1; r >= 0; r--) { let s = M[r][n]; for (let k = r + 1; k < n; k++) s -= M[r][k] * x[k]; x[r] = s / M[r][r]; }
-  return x;
-}
-const rotErr = (Rd, R) => { const E = mm(Rd, T3(R)); return [0.5 * (E[2][1] - E[1][2]), 0.5 * (E[0][2] - E[2][0]), 0.5 * (E[1][0] - E[0][1])]; };
-const rotAngle = (Rd, R) => { const E = mm(Rd, T3(R)); return Math.acos(Math.min(1, Math.max(-1, (E[0][0] + E[1][1] + E[2][2] - 1) / 2))); };
-
-// damped least squares + joint-limit clamping, several seeds (same scheme as the offline grid)
-// options.dir: desired index pointing direction (root frame, unit); soft axis-alignment task, rotation about the finger free.
-const fingerAxis = (ch, R) => mv(R, ch.finger_dir);
-const dirAngle = (ch, R, d) => Math.acos(Math.min(1, Math.max(-1, fingerAxis(ch, R).reduce((s, v, k) => s + v * d[k], 0))));
-function ik(side, target, Rd, options = {}) {
-  const key = tk() + side, ch = chains[key], lo = ch.qmin, hi = ch.qmax, wr = 0.3, dd = options.dir, wd = 0.3;
-  const seeds = [...(options.seeds || []), qcur[key].slice(), lo.map(() => 0), lo.map((l, i) => (l + hi[i]) / 2)];
-  for (let k = 0; k < (options.randomSeeds ?? 25); k++) seeds.push(lo.map((l, i) => l + Math.random() * (hi[i] - l)));
-  let best = null;
-  for (const s of seeds) {
-    let q = s.map((v, i) => Math.min(hi[i], Math.max(lo[i], v)));
-    for (let it = 0; it < (options.iterations ?? 200); it++) {
-      const { p, R, J } = fk(ch, q);
-      let e = target.map((v, k) => v - p[k]), Jt = J.slice(0, 3);
-      if (Math.hypot(...e) < 0.001 && (!Rd || rotAngle(Rd, R) < 3 * DEG) && (!dd || dirAngle(ch, R, dd) < 3 * DEG)) break;
-      if (Rd) { e = e.concat(rotErr(Rd, R).map(v => wr * v)); Jt = Jt.concat(J.slice(3).map(r => r.map(v => wr * v))); }
-      else if (dd) {  // a x a_des = rotation that aligns the finger; project the angular Jacobian orthogonally to a
-        const a = fingerAxis(ch, R), P = [0, 1, 2].map(i => [0, 1, 2].map(j => (i === j ? 1 : 0) - a[i] * a[j]));
-        const Jw = J.slice(3), Jp = P.map(r => Jw[0].map((_, c) => r.reduce((s2, v, k) => s2 + v * Jw[k][c], 0)));
-        e = e.concat(cross(a, dd).map(v => wd * v)); Jt = Jt.concat(Jp.map(r => r.map(v => wd * v)));
-      }
-      const A = Jt.map(r => Jt.map(r2 => r.reduce((s2, v, k) => s2 + v * r2[k], 0)));
-      A.forEach((r, i) => r[i] += 0.02 * 0.02);
-      const y = solve(A, e);
-      q = q.map((v, i) => { const d = Math.max(-0.2, Math.min(0.2, Jt.reduce((s2, r, k) => s2 + r[i] * y[k], 0))); return Math.min(hi[i], Math.max(lo[i], v + d)); });
-    }
-    const { p, R } = fk(ch, q);
-    const err = Math.hypot(...target.map((v, k) => v - p[k])), ang = Rd ? rotAngle(Rd, R) : 0, dang = dd ? dirAngle(ch, R, dd) : 0;
-    const score = err + (Rd && ang > 10 * DEG ? 1 : 0) + (dd ? 0.02 * dang : 0);  // position first, then pointing
-    if (!best || score < best.score) best = { q, err, ang, dang, score };
-    if (err < 0.002 && (!Rd || ang < 5 * DEG) && (!dd || dang < 10 * DEG)) break;
-  }
-  return best;
+function ik(side,target,Rd,options={}) {
+  return robotIK(chains[tk()+side],target,Rd,{current:qcur[tk()+side],...options});
 }
 
 const targetMarker = new THREE.Mesh(new THREE.SphereGeometry(0.015), new THREE.MeshBasicMaterial({ color: 0xff3366 }));
@@ -131,11 +79,11 @@ function setArm(key, q) {  // key = side or 't'+side; locked torso -> torso join
   chains[key].joints.forEach((n, i) => robot.setJointValue(n, q[i]));
 }
 function goTo(target) {
-  const side = $('arm').value, Rd = $('ikori').value === 'down' ? R_DOWN[side] : null;
+  const side = $('arm').value, Rd = $('ikori').value === 'mug' ? rows3(rotationFromZ(toHead(target, placement))) : null;
   targetMarker.position.set(...target); targetMarker.visible = true;
   const b = ik(side, target, Rd);
-  setArm(tk() + side, b.q);
-  const ok = b.err < 0.01 && (!Rd || b.ang < 10 * DEG);
+  setArm(tk() + side, b.q); showMug(side);
+  const ok = b.err < 0.01 && (!Rd || b.ang < 2 * DEG);
   const msg = `${ok ? 'reached' : 'NOT reachable'}: position error ${(b.err * 100).toFixed(1)} cm` +
     (Rd ? `, orientation error ${(b.ang / DEG).toFixed(1)}°` : '') +
     `\njoints [deg]: ${b.q.map(v => (v / DEG).toFixed(0)).join(' ')}`;
@@ -149,27 +97,55 @@ $('torso').addEventListener('change', () => $('home').onclick());
 // ---------- point clouds ----------
 const COLORS = { left: new THREE.Color(0x4a90ff), right: new THREE.Color(0xff9f40), both: new THREE.Color(0x3ddc84) };
 const HL = new THREE.Color(0xffee00);
-const clouds = {}; // clouds[variant][name] = THREE.Points
+const clouds = {}, insideIdx = {}; // clouds[variant][name] = THREE.Points
 const pmat = name => new THREE.PointsMaterial({ size: 0.008, vertexColors: true, transparent: true, opacity: 0.55, depthWrite: false });
-for (const v of ['free', 'down', 'tfree', 'tdown']) {
+const cone = {};  // cone[t+'cone'][left|right] = { idx: Int16Array, mask: Uint32Array }: points with >= 1 reachable handle direction
+function makePoints(n, idx) {
+  const pos = new Float32Array(idx.length); for (let i = 0; i < idx.length; i++) pos[i] = idx[i] * meta.step;
+  const g = new THREE.BufferGeometry();
+  g.setAttribute('position', new THREE.BufferAttribute(pos, 3));
+  const col = new Float32Array(pos.length); for (let i = 0; i < pos.length; i += 3) COLORS[n].toArray(col, i);
+  g.setAttribute('color', new THREE.BufferAttribute(col, 3));
+  return g;
+}
+for (const v of ['free', 'tfree', 'cone', 'tcone']) {
   clouds[v] = {};
+  if (v.endsWith('cone')) cone[v] = {};
   for (const n of ['left', 'right', 'both']) {
-    const buf = await (await fetch(`data/${v}_${n}.bin?v=6`)).arrayBuffer();
-    const idx = new Int16Array(buf), pos = new Float32Array(idx.length);
-    for (let i = 0; i < idx.length; i++) pos[i] = idx[i] * meta.step;
-    const g = new THREE.BufferGeometry();
-    g.setAttribute('position', new THREE.BufferAttribute(pos, 3));
-    const col = new Float32Array(pos.length); for (let i = 0; i < pos.length; i += 3) COLORS[n].toArray(col, i);
-    g.setAttribute('color', new THREE.BufferAttribute(col, 3));
-    const pts = new THREE.Points(g, pmat(n)); pts.name = n; pts.visible = false;
-    pts.userData.indices = idx;
-    clouds[v][n] = pts; world.add(pts);
+    let idx = new Int16Array(0);
+    if (v.endsWith('free')) idx = new Int16Array(await (await fetch(`data/${v}_${n}.bin?v=7`)).arrayBuffer());
+    else if (n !== 'both') cone[v][n] = { idx: new Int16Array(await (await fetch(`data/${v}_${n}.bin?v=7`)).arrayBuffer()),
+      mask: new Uint32Array(await (await fetch(`data/${v}_${n}_mask.bin?v=7`)).arrayBuffer()) };
+    const pts = new THREE.Points(makePoints(n, idx), pmat(n)); pts.name = n; pts.visible = false;
+    pts.userData.indices = idx; clouds[v][n] = pts; world.add(pts);
+  }
+}
+// (b): keep the points whose arm reaches the mug pose for some handle direction within 45 deg of the user's head
+const coneOK = (arm, i, p, pl) => feasibleDirs(arm.mask, W, i, MUG_DIRS, toHead(p, pl)).length > 0;
+const counts = {};
+function filterCone() {
+  for (const v in cone) {
+    const keep = {}, keys = {};
+    for (const n of ['left', 'right']) {
+      const { idx } = cone[v][n], out = [];
+      for (let i = 0; i < idx.length / 3; i++) {
+        const p = [idx[3 * i] * meta.step, idx[3 * i + 1] * meta.step, idx[3 * i + 2] * meta.step];
+        if (coneOK(cone[v][n], i, p, placement)) out.push(idx[3 * i], idx[3 * i + 1], idx[3 * i + 2]);
+      }
+      keep[n] = new Int16Array(out); keys[n] = new Set(); for (let i = 0; i < out.length; i += 3) keys[n].add(out.slice(i, i + 3).join(','));
+    }
+    const both = []; for (const k of keys.left) if (keys.right.has(k)) both.push(...k.split(',').map(Number));
+    keep.both = new Int16Array(both);
+    for (const n of ['left', 'right', 'both']) {
+      const pts = clouds[v][n]; pts.geometry.dispose(); pts.geometry = makePoints(n, keep[n]); pts.userData.indices = keep[n];
+      counts[v + '_' + n] = keep[n].length / 3;
+    }
   }
 }
 function refreshClouds() {
   const v = vkey();
   for (const vv in clouds) for (const n in clouds[vv]) clouds[vv][n].visible = vv === v && $('c_' + n).checked;
-  for (const n of ['left', 'right', 'both']) $('n_' + n).textContent = `(${meta[v + '_' + n]} pts)`;
+  for (const n of ['left', 'right', 'both']) $('n_' + n).textContent = `(${v.endsWith('cone') ? counts[v + '_' + n] : meta[v + '_' + n]} pts)`;
   const s = $('psize').value / 1000;
   for (const vv in clouds) for (const n in clouds[vv]) clouds[vv][n].material.size = s;
   updateRegion();
@@ -322,6 +298,7 @@ function updatePlacement() {
     reg.dims.box = boxU.size.slice(); reg.rpy = [0, 0, 0]; syncSliders();
   }
   $('bestmsg').textContent = ''; window.bestPlacement = null;
+  filterCone(); refreshClouds();
 }
 for (const [key, min, max] of [['d', 0.5, 1.2], ['y0', -0.5, 0.5], ['h', 0, 0.6]]) {
   const row = sliderRow(key, () => placement[key], v => { placement[key] = Number.isFinite(v) ? Math.min(max, Math.max(min, v)) : placement[key]; updatePlacement(); }, min, max, 0.01);
@@ -357,7 +334,6 @@ $('c_collab').onchange = () => {
 };
 updatePlacement();
 
-const insideIdx = {};
 function updateRegion() {
   regMesh.position.set(...reg.center);
   regMesh.quaternion.setFromEuler(new THREE.Euler(reg.rpy[0] * DEG, reg.rpy[1] * DEG, reg.rpy[2] * DEG, 'ZYX')); // URDF rpy convention
@@ -394,10 +370,21 @@ function updateRegion() {
   window.regionCounts = counts;
 }
 const placementSearches = {};
+// Box coverage (union / both, lattice points incl. boundary) for every variant at the current placement.
+function coverageAll() {
+  const out = {};
+  for (const v of ['free', 'cone', 'tfree', 'tcone']) {
+    const s = v.endsWith('cone') ? createConePlacementSearch([cone[v].left, cone[v].right], W, MUG_DIRS, coneOK, meta.step)
+      : createPlacementSearch(clouds[v].left.userData.indices, clouds[v].right.userData.indices, meta.step);
+    out[(v[0] === 't' ? 'torso_free_' : 'torso_locked_') + (v.endsWith('cone') ? 'b_pose_cone' : 'a_position')] = s.coverage(boxU, placement);
+  }
+  return out;
+}
 function bestPlacement() {
   const started = performance.now(), v = vkey();
-  if (!placementSearches[v]) placementSearches[v] = createPlacementSearch(
-    clouds[v].left.userData.indices, clouds[v].right.userData.indices, meta.step);
+  if (!placementSearches[v]) placementSearches[v] = v.endsWith('cone')
+    ? createConePlacementSearch([cone[v].left, cone[v].right], W, MUG_DIRS, coneOK, meta.step)
+    : createPlacementSearch(clouds[v].left.userData.indices, clouds[v].right.userData.indices, meta.step);
   const result = placementSearches[v].findBest(boxU);
   if (!result) {
     window.bestPlacement = null;
@@ -410,7 +397,7 @@ function bestPlacement() {
   window.bestPlacement = result;
   $('bestmsg').textContent = `Best d=${placement.d.toFixed(2)}, y0=${placement.y0.toFixed(2)}, h=${placement.h.toFixed(2)} m\n` +
     `union ${(100 * result.coverage.fractions.union).toFixed(2)}%; both ${(100 * result.coverage.fractions.both).toFixed(2)}%\n` +
-    `${result.candidates} placements; ${result.elapsed_ms.toFixed(0)} ms`;
+    `${result.candidates} placements${result.evaluated ? ` (${result.evaluated} evaluated exactly)` : ''}; ${result.elapsed_ms.toFixed(0)} ms`;
   return result;
 }
 $('best_placement').onclick = bestPlacement;
@@ -424,10 +411,16 @@ $('dl').onclick = () => {
     type: reg.type, frame: 'root_link', units: 'm', center: reg.center,
     dims: reg.type === 'box' ? { size_xyz: reg.dims.box } : reg.type === 'sphere' ? { radius: reg.dims.sphere[0] } : { semi_axes_abc: reg.dims.ellipsoid },
     orientation: { rpy_deg: reg.rpy, rpy_convention: 'URDF (R = Rz(yaw) Ry(pitch) Rx(roll)), fixed axes of root_link', quaternion_xyzw: [q.x, q.y, q.z, q.w] },
-    reachability_variant: (v.endsWith('free') ? 'position only, orientation free' : 'palm down, index pointing forward (±10 deg)') +
+    reachability_variant: (v.endsWith('free') ? '(a) mug frame position only, orientation free' : `(b) mug frame pose: handle z within ${CONE_DEG} deg of the direction to the user head (current placement), cylinder axis orthogonal to z and as vertical as possible`) +
       (v[0] === 't' ? '; torso joints used (roll ±23, pitch -18..45, yaw ±43 deg)' : '; torso locked at 0'),
     reachable_counts: window.regionCounts,
-    notes: 'ergoCub, fixed root (root_link); end-effector = index fingertip of the pointing hand (0.188 m from the l/r_hand_palm origin); grid 2 cm; reachable if IK position error < 1 cm',
+    notes: 'ergoCub, fixed root (root_link); end-effector = mug frame (centre of cylinder B) of the object held in a power grasp; grid 2 cm; reachable if IK position error < 1 cm (and, for (b), rotation error < 2 deg for one of the sampled handle directions)',
+    object: { shape: 'two vertical cylinders joined by a bar', diameter: OBJ.diameter, height: OBJ.height, axis_separation: OBJ.axis_separation,
+      bounding_box: OBJ.bounding_box, bar: OBJ.bar, grasp: OBJ.grasp, palm_to_mug: { l: chains.l.palm_to_mug, r: chains.r.palm_to_mug } },
+    mug_frame: OBJ.frame,
+    orientation_constraint: { cone_half_angle_deg: CONE_DEG, axis: 'mug z (handle direction, A->B)', towards: 'user head centre, U = [0, 0, 0.63] m',
+      cylinder_axis: 'y = world up projected orthogonally to z (cylinders vertical when z is horizontal; tilt = elevation of z)',
+      sampling: meta.mug_dirs_def, tol_rot_deg: meta.tol_rot_deg },
   };
   if ($('c_collab').checked) out.collaborator = {
     frame_U: { origin: 'seated user pelvis', axes: { x: 'user gaze', y: 'user left', z: 'up' }, units: 'm' },
@@ -437,8 +430,10 @@ $('dl').onclick = () => {
     placement: { root_link_in_U: { position: [placement.d, placement.y0, placement.h], yaw_deg: 180 },
       user_pelvis_in_root_link: { position: [placement.d, placement.y0, -placement.h], yaw_deg: 180 },
       pelvis_height_above_floor: 0.779 - placement.h, floor_z_root_link: -0.779 },
+    head_U: [0, 0, 0.63], head_root_link: headRoot(placement),
     coverage: window.regionCoverage,
-    notes: 'No collision checking; target = ergoCub index fingertip (pointing hand) = human index fingertip (contact)',
+    coverage_variants: coverageAll(),
+    notes: 'No collision checking; handover pose = mug frame (cylinder B) = human grip frame (wrist axes, origin 0.07 m along the hand axis)',
   };
   if ($('c_dlpts').checked) {
     out.reachable_points = {};
@@ -458,58 +453,55 @@ window.app = { goTo, fk, chains, reg, updateRegion, clouds, placement, user, box
 renderer.setAnimationLoop(() => renderer.render(scene, camera));
 
 
-// Experiment target pool is the cloud/box intersection; every cached target
-// additionally passes the real controller-chain IK before being observed.
+// Experiment pool: box lattice points reachable under (b) for the current placement and torso mode, with the
+// handle directions (within 45 deg of the head) each arm reaches; every chosen pose is re-solved by the in-browser IK.
+const humanMat2 = new THREE.MeshStandardMaterial({ color: 0xd9a37f, transparent: true, opacity: 0.8, roughness: 0.8 });
+const fist = new THREE.Mesh(new THREE.BoxGeometry(0.07, 0.085, 0.10), humanMat2); fist.visible = false; user.add(fist);
 const experiment = createExperiment({
   user, world, enabled: () => $('c_collab').checked,
   box: () => boxU, placement: () => placement, torso: () => $('torso').value,
-  drawHuman(points, knuckle) {
-    placeLimb(rightUpper, points[0], points[1]);
-    placeLimb(rightForearm, points[1], points[2]);
-    rightHand.position.set(...points[2].map((v,k) => (v+knuckle[k])/2));
-    // Hand box has its long direction on x; orient it along wrist–knuckle, then the extended index knuckle–tip.
-    rightHand.quaternion.setFromUnitVectors(new THREE.Vector3(1,0,0), new THREE.Vector3(...knuckle).sub(new THREE.Vector3(...points[2])).normalize());
-    rightHand.scale.x = 0.10 / 0.11; rightIndex.visible = true; placeLimb(rightIndex, knuckle, points[3]);
+  dirs: MUG_DIRS,
+  // f = humanFK: points [shoulder, elbow, wrist, grip]; R = grip/wrist frame (U). Closed fist drawn around cylinder B.
+  drawHuman(f) {
+    const [s, e, w, g] = f.points;
+    placeLimb(rightUpper, s, e); placeLimb(rightForearm, e, w);
+    rightHand.visible = false; rightIndex.visible = false;
+    const R = f.R, m = new THREE.Matrix4().set(R[0], R[1], R[2], 0, R[3], R[4], R[5], 0, R[6], R[7], R[8], 0, 0, 0, 0, 1);
+    fist.quaternion.setFromRotationMatrix(m); fist.position.set(...g); fist.visible = true;
   },
-  // All reachable cloud points (current torso mode, position-only) inside the box, in U and root frames.
   candidatePool() {
-    const entries = new Map();
-    for (const [name, side] of [['left','l'],['right','r']]) {
-      const data = clouds[tk()+'free'][name].geometry.attributes.position;
-      for (let i=0;i<data.count;i++) {
-        const root=[data.getX(i),data.getY(i),data.getZ(i)];
-        const pose=[placement.d-root[0],placement.y0-root[1],root[2]+placement.h];
-        if (!pose.every((v,k) => Math.abs(v-boxU.center[k]) <= boxU.size[k]/2+1e-8)) continue;
-        const key=root.map(v=>v.toFixed(4)).join(',');
-        if (!entries.has(key)) entries.set(key,{pose,root,sides:[]});
-        entries.get(key).sides.push(side);
+    const v = tk() + 'cone', map = new Map();
+    for (const [n, side] of [['left', 'l'], ['right', 'r']]) {
+      const { idx, mask } = cone[v][n];
+      for (let i = 0; i < idx.length / 3; i++) {
+        const root = [idx[3 * i] * meta.step, idx[3 * i + 1] * meta.step, idx[3 * i + 2] * meta.step];
+        const pose = [placement.d - root[0], placement.y0 - root[1], root[2] + placement.h];
+        if (!pose.every((v, k) => Math.abs(v - boxU.center[k]) <= boxU.size[k] / 2 + 1e-8)) continue;
+        const dirs = feasibleDirs(mask, W, i, MUG_DIRS, toHead(root, placement));
+        if (!dirs.length) continue;
+        const key = root.map(v => v.toFixed(4)).join(',');
+        if (!map.has(key)) map.set(key, { root, pose, arms: {} });
+        map.get(key).arms[side] = dirs;
       }
     }
-    return [...entries.values()];
+    return [...map.values()];
   },
-  plan(candidate) {
-    if(!robot) return null;
-    const near = candidate.root[1] > 0 ? 'l' : 'r';  // try the arm on the target's side first
-    for(const side of [...candidate.sides].sort((a,b)=>(b===near)-(a===near))) {
-      const b=ik(side,candidate.root,null,{randomSeeds:3,iterations:100});
-      if(b.err<0.01) return {...b,side,key:tk()+side,target:candidate.root.slice()};
+  // Robot IK on the full mug pose (root frame rotation Rflat); tolerance as offline: 1 cm, 2 deg.
+  plan(candidate, k, rng) {
+    if (!robot) return null;
+    const Rd = rows3(rotationFromZ(MUG_DIRS[k]));
+    const sides = Object.keys(candidate.arms).filter(s => candidate.arms[s].includes(k));
+    const near = candidate.root[1] > 0 ? 'l' : 'r';
+    for (const side of sides.sort((a, b) => (b === near) - (a === near))) {
+      const b = robotIK(chains[tk() + side], candidate.root, Rd, { randomSeeds: 10, iterations: 150, rng });
+      if (b.err < 0.01 && b.ang < 2 * DEG) return { ...b, side, key: tk() + side, target: candidate.root.slice(), dir: k };
     }
     return null;
   },
-  // Re-plan the chosen arm so the index points against the human finger (dirU: human finger direction in U).
-  // Keeps the position-only plan if the pointing solution misses the fingertip by >= 1 cm.
-  orient(plan, dirU) {
-    const d=[-dirU[0],-dirU[1],dirU[2]].map(v=>-v);  // U -> root_link (yaw 180°), then opposite direction
-    const ch=chains[plan.key], a=ik(plan.side,plan.target,null,{dir:d,seeds:[plan.q],randomSeeds:6,iterations:200});
-    // position has priority: polish the pointing solution with position-only iterations, keep whichever is better aligned
-    const b=ik(plan.side,plan.target,null,{seeds:[a.q],randomSeeds:0,iterations:80});
-    b.dang=dirAngle(ch,fk(ch,b.q).R,d); const p0=dirAngle(ch,fk(ch,plan.q).R,d);
-    return b.err<0.01 && b.dang<p0 ? {...plan,...b,pointing:true,dirDes:d} : {...plan,pointing:false,dirDes:d,dang:p0};
-  },
-  resetHuman: () => updatePlacement(),
+  resetHuman: () => { fist.visible = false; rightHand.visible = true; updatePlacement(); },
   current: plan => qcur[plan.key].slice(),
-  apply: (plan,q) => setArm(plan.key,q),
-  tipPosition: plan => fk(chains[plan.key],qcur[plan.key]).p,
+  apply: (plan, q) => { setArm(plan.key, q); showMug(plan.side); },
+  mugPose: plan => fk(chains[plan.key], qcur[plan.key]),
 });
 window.experiment = experiment;
 
@@ -517,6 +509,14 @@ window.experiment = experiment;
 const qs = new URLSearchParams(location.search);
 if (qs.has('collab')) { $('c_collab').checked = true; $('c_collab').onchange(); }
 if (qs.has('collab') && qs.has('best')) bestPlacement();
+if (qs.has('collab') && qs.has('cov')) {  // coverage of the box, default placement and best placement per variant/torso
+  const res = { default_placement: { ...placement }, at_default: coverageAll(), best: {} };
+  for (const t of ['locked', 'free']) for (const v of ['free', 'cone']) {
+    $('torso').value = t; $('variant').value = v; refreshClouds();
+    const b = bestPlacement(); res.best[t + '_' + v] = { placement: b.placement, union: b.coverage.fractions.union, both: b.coverage.fractions.both, evaluated: b.evaluated, ms: Math.round(b.elapsed_ms), all: coverageAll() };
+  }
+  const pre = document.createElement('pre'); pre.id = 'cov'; pre.textContent = JSON.stringify(res); document.body.appendChild(pre);
+}
 if (qs.has('collab') && qs.has('exp')) {  // e.g. ?collab&exp&preset=elbow&policy=active&n=25&seed=7&fast
   while (!robot) await new Promise(r => setTimeout(r, 100));
   ['c_left', 'c_right'].forEach(i => $(i).checked = false); refreshClouds();  // declutter the view for the run
@@ -524,22 +524,26 @@ if (qs.has('collab') && qs.has('exp')) {  // e.g. ?collab&exp&preset=elbow&polic
   experiment.configure(Object.fromEntries(qs));
   experiment.start();
 }
-if (qs.has('test') || qs.has('region') || qs.has('down') || qs.has('locked') || qs.has('ik')) {
+if (qs.has('test') || qs.has('region') || qs.has('pos') || qs.has('locked') || qs.has('ik')) {
   while (!robot) await new Promise(r => setTimeout(r, 100));
-  if (qs.has('down')) { $('variant').value = 'down'; refreshClouds(); }
+  if (qs.has('pos')) { $('variant').value = 'free'; refreshClouds(); }
   if (qs.has('locked')) { $('torso').value = 'locked'; refreshClouds(); }
   if (qs.has('region')) { $('c_region').checked = true; $('c_region').onchange(); $('c_both').checked = true; refreshClouds(); }
   const out = [];
-  for (const [side, t] of [['l', [0.25, 0.25, 0.35]], ['r', [0.2, -0.3, 0.2]], ['l', [0.9, 0.0, 0.3]]]) {
-    $('arm').value = side; goTo(t);
-    const w = new THREE.Vector3(...chains.hand.tip_in_index_3); robot.links[side + '_hand_index_3'].localToWorld(w); world.worldToLocal(w);
-    const p = fk(chains[tk() + side], window.lastIK.q).p;
-    out.push(`${side} target ${t} ik_err ${window.lastIK.err.toFixed(4)} urdf-vs-fk ${Math.hypot(w.x - p[0], w.y - p[1], w.z - p[2]).toExponential(2)}`);
+  // FK of the mug frame vs the rendered mug group (urdf-loader hierarchy + palm_to_mug)
+  for (const [side, t, o] of [['l', [0.25, 0.25, 0.35], 'free'], ['r', [0.2, -0.3, 0.2], 'free'], ['r', [0.35, -0.15, 0.25], 'mug'], ['l', [0.9, 0.0, 0.3], 'free']]) {
+    $('arm').value = side; $('ikori').value = o; goTo(t); robot.updateMatrixWorld(true);
+    const M = new THREE.Matrix4().copy(world.matrixWorld).invert().multiply(mugs[side].matrixWorld), e = M.elements;
+    const f = fk(chains[tk() + side], window.lastIK.q);
+    const dp = Math.hypot(e[12] - f.p[0], e[13] - f.p[1], e[14] - f.p[2]);
+    const dR = Math.max(...[0, 1, 2].flatMap(r => [0, 1, 2].map(c => Math.abs(e[4 * c + r] - f.R[r][c]))));
+    out.push(`${side} ${o} target ${t} ik_err ${window.lastIK.err.toFixed(4)} ang ${(window.lastIK.ang / DEG).toFixed(2)} urdf-vs-fk pos ${dp.toExponential(2)} rot ${dR.toExponential(2)}`);
   }
+  $('ikori').value = 'free';
   $('dl').onclick.toString();
   out.push('region counts ' + JSON.stringify(window.regionCounts));
   if (qs.has('ik')) { // ?ik=side,x,y,z,ori  e.g. ik=l,0.3,0.2,0.3,down
-    const [sd, x, y, z, o] = qs.get('ik').split(','); $('arm').value = sd; $('ikori').value = o || 'free';
+    const [sd, x, y, z, o] = qs.get('ik').split(','); $('arm').value = sd; $('ikori').value = o || 'free';  // o: free | mug
     goTo([+x, +y, +z]); camera.position.set(0.9, 0.9, 0.5); orbit.target.set(+x, +z, -y); orbit.update();
   }
   const pre = document.createElement('pre'); pre.id = 'test'; pre.textContent = out.join('\n'); document.body.appendChild(pre);

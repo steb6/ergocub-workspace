@@ -3,14 +3,15 @@
 export const RAD = Math.PI / 180;
 export const HUMAN = {
   names: ['Sx', 'Sy', 'Sz', 'Ey', 'Ez', 'Wx', 'Wy'],
-  shoulder: [0, -0.216, 0.42], lengths: [0.30, 0.26, 0.18], palm: 0.10,
-  // lengths[2] = wrist -> index fingertip with the index extended (pointing hand): palm 0.10 + finger 0.08.
+  shoulder: [0, -0.216, 0.42], lengths: [0.30, 0.26, 0.07], palm: 0.10,
+  // lengths[2] = grip: wrist -> fist centre along the hand axis (where the grasped cylinder B lies). The task frame
+  // is the wrist frame translated there (set 0 for the bare anatomical wrist).
   // Numerical anthropometry and reference posture are assumptions, not values
   // reported in the paper. Rotations are intrinsic X,-Y,Z,-Y,Z,X,-Y.
   lower: [-45, -40, -90, 0, -90, -80, -30].map(v => v * RAD),
   upper: [150, 180, 90, 150, 90, 70, 40].map(v => v * RAD),
   nominal: [0, 90, 0, 30, 0, 0, 0].map(v => v * RAD),
-  zeta: 0.08727, gamma: 0.05, taskWeight: 2500,
+  zeta: 0.08727, gamma: 0.05, taskWeight: 2500, rotationScale: 0.15,
 };
 export const PRESETS = { healthy: [0, 0], shoulder: [1, 0], elbow: [0, 1], shoulderHalf: [0.5, 0], elbowHalf: [0, 0.5] };
 export function seededRandom(seed = 2026) {
@@ -44,10 +45,15 @@ export function humanFK(q, model = HUMAN, jacobian = false) {
     const length = i === 2 ? model.lengths[0] : i === 4 ? model.lengths[1] : i === 6 ? model.lengths[2] : 0;
     if (length) { const d = mv(R, [0,0,-length]); p = p.map((v,k) => v+d[k]); points.push(p.slice()); }
   }
-  const dir = mv(R, [0,0,-1]), knuckle = points[2].map((v,k) => v + model.palm*dir[k]);  // finger points along the hand axis
+  // Calibrated wrist axes: x=-anatomical y, y=anatomical x, z=anatomical z.
+  // z points back along the hand/forearm; y is the through-fist cylinder axis.
+  R = mul(R, [0,1,0,-1,0,0,0,0,1]);
+  if (points.length === 3) points.push(p.slice());
+  const dir = mv(R, [0,0,-1]), knuckle = p.map((v,k) => v + model.palm*dir[k]);
   const J = jacobian ? directions.map((a,i) => { const d = p.map((v,k) => v-origins[i][k]); return [a[1]*d[2]-a[2]*d[1],a[2]*d[0]-a[0]*d[2],a[0]*d[1]-a[1]*d[0]]; }) : null;
-  return { p, points, R, J, dir, knuckle };
+  return { p, points, R, J, angularJ: directions, dir, knuckle };
 }
+
 function solve(A,b) {
   const n=b.length, M=A.map((r,i)=>[...r,b[i]]);
   for(let c=0;c<n;c++) {
@@ -59,17 +65,22 @@ function solve(A,b) {
 }
 // Eq. (3) approximated by bounded, damped Gauss–Newton with a stiff task
 // penalty. It returns a best-effort posture even for unreachable positions.
-// The task is position-only: the index fingertip at the contact point; finger direction is not prescribed.
+// Full grip-frame pose (target {p, R} or position array). Matrix residual avoids the false zero at a 180-degree error.
 export function humanIK(target, alpha, model = HUMAN) {
+  const tp=target.p || target, tr=target.R || null, wr=(model.rotationScale ?? .15)/Math.sqrt(2);
   const lim=bounds(alpha,model), a=[0,alpha[0],0,alpha[1],0,0,0];
   const w=a.map(v=>v*v+model.gamma*(1-v)*(1-v));
-  const cost=q=>{const p=humanFK(q,model).p;return model.taskWeight*p.reduce((s,v,k)=>s+(v-target[k])**2,0)+q.reduce((s,v,k)=>s+w[k]*(v-model.nominal[k])**2,0);};
+  const residual=f=>tp.map((v,k)=>v-f.p[k]).concat(tr?tr.map((v,k)=>wr*(v-f.R[k])):[]);
+  const cost=q=>{const e=residual(humanFK(q,model));return model.taskWeight*e.reduce((s,v)=>s+v*v,0)+q.reduce((s,v,k)=>s+w[k]*(v-model.nominal[k])**2,0);};
   let best=null;
-  // Fixed starts make predictions independent of truth, history and particle order.
   for(const start of [model.nominal, [0,55*RAD,0,70*RAD,0,0,0], [0,90*RAD,0,0,0,0,0], [60*RAD,30*RAD,-60*RAD,100*RAD,0,0,0]]) {
     let q=start.map((v,k)=>clamp(v,lim.lower[k],lim.upper[k])), value=cost(q);
-    for(let it=0;it<35;it++) {
-      const {p,J}=humanFK(q,model,true), e=p.map((v,k)=>target[k]-v);
+    for(let it=0;it<55;it++) {
+      const f=humanFK(q,model,true), e=residual(f), J=f.J.map((j,i)=>{
+        if(!tr)return j;
+        const [x,y,z]=f.angularJ[i], R=f.R;
+        return j.concat([0,1,2].flatMap(r=>[0,1,2].map(c=>wr*(r===0?y*R[6+c]-z*R[3+c]:r===1?z*R[c]-x*R[6+c]:x*R[3+c]-y*R[c]))));
+      });
       const A=J.map((u,i)=>J.map((v,j)=>model.taskWeight*u.reduce((s,x,k)=>s+x*v[k],0)+(i===j?w[i]+0.2:0)));
       const b=J.map((u,i)=>model.taskWeight*u.reduce((s,x,k)=>s+x*e[k],0)-w[i]*(q[i]-model.nominal[i]));
       const dq=solve(A,b).map(v=>clamp(v,-0.3,0.3));
@@ -83,7 +94,9 @@ export function humanIK(target, alpha, model = HUMAN) {
     }
     if(!best||value<best.cost) best={q,cost:value};
   }
-  const f=humanFK(best.q,model);return {...best,...f,error:Math.hypot(...f.p.map((v,k)=>v-target[k]))};
+  const f=humanFK(best.q,model);
+  const angle=tr?Math.acos(clamp((tr.reduce((s,v,k)=>s+v*f.R[k],0)-1)/2,-1,1)):0;
+  return {...best,...f,error:Math.hypot(...f.p.map((v,k)=>v-tp[k])),orientationError:angle};
 }
 // Paper defaults (Sec. II-C): 50 particles, sigma_q^2 = 0.2 rad^2, resample when
 // Neff/Np < 0.4 with Gaussian jitter of variance 0.05, stop when both marginal
